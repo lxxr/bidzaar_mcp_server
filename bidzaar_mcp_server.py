@@ -1,16 +1,16 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Fri Jan 13 17:42:41 2026
+Created on Fri Feb 20 17:42:41 2026
 
 @author: rublev.an
 """
 """
-MCP Server for Bidzaar Connector API (stdio) v 0.1
+MCP Server for Bidzaar Connector API (stdio)
 Implements Bidzaar API v5.2
 """
 
 import os
-import sys
 import json
 import asyncio
 import logging
@@ -27,7 +27,7 @@ from mcp.server import Server, NotificationOptions
 from mcp.server.models import InitializationOptions
 import mcp.server.stdio
 import mcp.types as types
-
+import sys
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -58,6 +58,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bidzaar-mcp-server")
 
+
+# ============================================================================
+# BIDZAAR API CLIENT
+# ============================================================================
 
 @dataclass
 class BidzaarConfig:
@@ -146,12 +150,16 @@ class BidzaarClient:
         return response.text if response.content else None
 
 
-# MCP Server
+# ============================================================================
+# MCP SERVER
+# ============================================================================
 
 app = Server("bidzaar-mcp-server")
 client = BidzaarClient(BidzaarConfig())
 
-# TOOLs: All Methods from v5.2 API
+# ============================================================================
+# TOOL DEFINITIONS 
+# ============================================================================
 
 @app.list_tools()
 async def list_tools() -> list[types.Tool]:
@@ -166,7 +174,7 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "name": {"type": "string", "description": "Procedure name, max 600 chars"},
                     "type": {"type": "integer", "description": "Procedure type: 1=procurement, 2=sale, 3=registry"},
-                    "trading_type": {"type": "integer", "description": "Trading type: 1=fixed_volume (rfp), 2=per_unit (rfp unit), 4=PCO (qualification), 8=market_monitoring (rfi), 16=registry"},
+                    "trading_type": {"type": "integer", "description": "Trading type: 1=fixed_volume (rfp), 2=per_unit (rfq), 4=PCO (qualification), 8=market_monitoring (rfi), 16=registry"},
                     "description": {"type": "string", "description": "HTML description, max 4088 chars"},
                     "open_type": {"type": "integer", "description": "0=open (all suppliers), 1=closed (invited only)", "default": 0},
                     "currency": {"type": "string", "description": "Currency: RUB, USD, EUR, etc", "default": "RUB"},
@@ -188,6 +196,7 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["procedure_id"]
             }
         ),
+        
         types.Tool(
             name="update_procedure",
             description="Update existing procedure parameters. Can modify name, description, end date, positions, etc. For published procedures, changes will cause republication. Use custom_mail to notify participants.",
@@ -531,7 +540,7 @@ async def list_tools() -> list[types.Tool]:
             }
         ),
         
-        ========== CHAT ==========
+        # ========== CHAT ==========
         types.Tool(
             name="get_chat_spaces",
             description="Get all chat spaces for the company. Each space corresponds to a procedure.",
@@ -686,7 +695,7 @@ async def list_tools() -> list[types.Tool]:
             }
         ),
         
-        ========== CANCELLATION ==========
+        # ========== CANCELLATION ==========
         types.Tool(
             name="cancel_delayed_publication",
             description="Cancel scheduled delayed publication of a procedure or stage.",
@@ -710,7 +719,7 @@ async def list_tools() -> list[types.Tool]:
             }
         ),
         
-        # ========== AI DESCRIPTION IMPROVEMENT ==========
+        # ========== AI IMPROVEMENT ==========
         types.Tool(
             name="improve_description",
             description="Generate improved procedure description using AI. Returns improved text and suggests missing sections.",
@@ -723,7 +732,17 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["procedure_id", "description"]
             }
         ),
-        
+        types.Tool(
+            name="predict_and_apply_tags",
+            description="Generate tags for specific procedure by its UUID. Returns complete procedure data including status, positions, participants count, etc.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "procedure_id": {"type": "string", "description": "UUID of the procedure"}
+                },
+                "required": ["procedure_id"]
+            }
+        ),
         # ========== RETURN TO EVALUATION ==========
         types.Tool(
             name="return_to_evaluation",
@@ -768,95 +787,177 @@ async def list_tools() -> list[types.Tool]:
     ]
 
 
+# ============================================================================
 # TOOL HANDLERS
-HANDLERS = {
-    "create_procedure": create_procedure_handler,
-    "get_procedure": get_procedure_handler,
-    "update_procedure": update_procedure_handler,
-    "delete_procedure_draft": delete_procedure_draft_handler,
-    "publish_procedure": publish_procedure_handler,
-    "get_proposals_ids": get_proposals_ids_handler,
-    "get_proposals": get_proposals_handler,
-    "get_proposals_ranks": get_proposals_ranks_handler,
-    "rollback_proposal": rollback_proposal_handler,
-    "get_participants": get_participants_handler,
-    "invite_participants": invite_participants_handler,
-    "block_participants": block_participants_handler,
-    "unblock_participants": unblock_participants_handler,
-    "approve_participants": approve_participants_handler,
-    "reject_participants": reject_participants_handler,
-    "get_blocked_participants": get_blocked_participants_handler,
-    "get_events": get_events_handler,
-    "complete_with_winners": complete_with_winners_handler,
-    "complete_without_winners": complete_without_winners_handler,
-    "finish_proposals_acceptance": finish_proposals_acceptance_handler,
-    "get_stages": get_stages_handler,
-    "get_stages_full_info": get_stages_full_info_handler,
-    "announce_new_stage": announce_new_stage_handler,
-    "get_choices": get_choices_handler,
-    "set_winners": set_winners_handler,
-    "get_companies_info": get_companies_info_handler,
-    "get_segments": get_segments_handler,
-    "get_tags": get_tags_handler,
-    "get_special_conditions": get_special_conditions_handler,
-    "get_chat_spaces": get_chat_spaces_handler,
-    "get_chats": get_chats_handler,
-    "send_chat_message": send_chat_message_handler,
-    "upload_files": upload_files_handler,
-    "get_file": get_file_handler,
-    "get_comparison_file": get_comparison_file_handler,
-    "get_report_file": get_report_file_handler,
-    "get_participant_applications": get_participant_applications_handler,
-    "request_documents": request_documents_handler,
-    "apply_promo_code": apply_promo_code_handler,
-    "add_additional_currency": add_additional_currency_handler,
-    "update_additional_currencies": update_additional_currencies_handler,
-    "cancel_delayed_publication": cancel_delayed_publication_handler,
-    "cancel_stage": cancel_stage_handler,
-    "improve_description": improve_description_handler,
-    "return_to_evaluation": return_to_evaluation_handler,
-    "allow_price_change": allow_price_change_handler,
-    "reject_price_change_request": reject_price_change_request_handler,
-}
+# ============================================================================
 
 async def execute_tool(tool_name: str, arguments: Dict) -> Any:
     """Execute tool with given arguments"""
-    logger.info(f"🔧 Executing tool: {tool_name}")
+    logger.info(f"Executing tool: {tool_name}")
     logger.debug(f"Arguments: {json.dumps(arguments, ensure_ascii=False, default=str)}")
     try:
-        handler = HANDLERS.get(tool_name)
-        if handler:
-            return await handler(arguments)
-        return {"error": f"Unknown tool: {tool_name}"}        
+        if tool_name == "create_procedure":
+            return await create_procedure_handler(arguments)
+        elif tool_name == "get_procedure":
+            return await get_procedure_handler(arguments)
+        elif tool_name == "update_procedure":
+            return await update_procedure_handler(arguments)
+        elif tool_name == "delete_procedure_draft":
+            return await delete_procedure_draft_handler(arguments)
+        elif tool_name == "publish_procedure":
+            return await publish_procedure_handler(arguments)
+        elif tool_name == "get_proposals_ids":
+            return await get_proposals_ids_handler(arguments)
+        elif tool_name == "get_proposals":
+            return await get_proposals_handler(arguments)
+        elif tool_name == "get_proposals_ranks":
+            return await get_proposals_ranks_handler(arguments)
+        elif tool_name == "rollback_proposal":
+            return await rollback_proposal_handler(arguments)
+        elif tool_name == "get_participants":
+            return await get_participants_handler(arguments)
+        elif tool_name == "invite_participants":
+            return await invite_participants_handler(arguments)
+        elif tool_name == "block_participants":
+            return await block_participants_handler(arguments)
+        elif tool_name == "unblock_participants":
+            return await unblock_participants_handler(arguments)
+        elif tool_name == "approve_participants":
+            return await approve_participants_handler(arguments)
+        elif tool_name == "reject_participants":
+            return await reject_participants_handler(arguments)
+        elif tool_name == "get_blocked_participants":
+            return await get_blocked_participants_handler(arguments)
+        elif tool_name == "get_events":
+            return await get_events_handler(arguments)
+        elif tool_name == "complete_with_winners":
+            return await complete_with_winners_handler(arguments)
+        elif tool_name == "complete_without_winners":
+            return await complete_without_winners_handler(arguments)
+        elif tool_name == "finish_proposals_acceptance":
+            return await finish_proposals_acceptance_handler(arguments)
+        elif tool_name == "get_stages":
+            return await get_stages_handler(arguments)
+        elif tool_name == "get_stages_full_info":
+            return await get_stages_full_info_handler(arguments)
+        elif tool_name == "announce_new_stage":
+            return await announce_new_stage_handler(arguments)
+        elif tool_name == "get_choices":
+            return await get_choices_handler(arguments)
+        elif tool_name == "set_winners":
+            return await set_winners_handler(arguments)
+        elif tool_name == "get_companies_info":
+            return await get_companies_info_handler(arguments)
+        elif tool_name == "get_segments":
+            return await get_segments_handler(arguments)
+        elif tool_name == "get_tags":
+            return await get_tags_handler(arguments)
+        elif tool_name == "get_special_conditions":
+            return await get_special_conditions_handler(arguments)
+        elif tool_name == "get_chat_spaces":
+            return await get_chat_spaces_handler(arguments)
+        elif tool_name == "get_chats":
+            return await get_chats_handler(arguments)
+        elif tool_name == "send_chat_message":
+            return await send_chat_message_handler(arguments)
+        elif tool_name == "upload_files":
+            return await upload_files_handler(arguments)
+        elif tool_name == "get_file":
+            return await get_file_handler(arguments)
+        elif tool_name == "get_comparison_file":
+            return await get_comparison_file_handler(arguments)
+        elif tool_name == "get_report_file":
+            return await get_report_file_handler(arguments)
+        elif tool_name == "get_participant_applications":
+            return await get_participant_applications_handler(arguments)
+        elif tool_name == "request_documents":
+            return await request_documents_handler(arguments)
+        elif tool_name == "apply_promo_code":
+            return await apply_promo_code_handler(arguments)
+        elif tool_name == "add_additional_currency":
+            return await add_additional_currency_handler(arguments)
+        elif tool_name == "update_additional_currencies":
+            return await update_additional_currencies_handler(arguments)
+        elif tool_name == "cancel_delayed_publication":
+            return await cancel_delayed_publication_handler(arguments)
+        elif tool_name == "cancel_stage":
+            return await cancel_stage_handler(arguments)
+        elif tool_name == "improve_description":
+            return await improve_description_handler(arguments)
+        elif tool_name == "return_to_evaluation":
+            return await return_to_evaluation_handler(arguments)
+        elif tool_name == "allow_price_change":
+            return await allow_price_change_handler(arguments)
+        elif tool_name == "reject_price_change_request":
+            return await reject_price_change_request_handler(arguments)
+        elif tool_name == "predict_and_apply_tags":
+            return await predict_and_apply_handler(arguments)
+        else:
+            return {"error": f"Unknown tool: {tool_name}"}
+            
     except Exception as e:
         logger.exception(f"Error executing {tool_name}")
         return {"error": str(e)}
 
 
-# HANDLER IMPLEMENTATIONS
-
+# Handlers implementation
 async def create_procedure_handler(args: Dict) -> Dict:
     """
     Create procedure handler with correct field handling for different trading types
+    Fills all fields with default values according to the schema
     """
-    logger.info(f"Creating procedure: {args.get('name')}")
+    logger.info(f"📝 Creating procedure: {args.get('name')}")
     
     try:
         trading_type = args.get("trading_type", 8)
         is_draft = args.get("publish_immediately") is False
         has_positions = bool(args.get("positions"))
         
-        # БАЗОВЫЕ ОБЯЗАТЕЛЬНЫЕ ПОЛЯ
+        # Обработка даты окончания
+        acceptance_end_date = args.get("acceptance_end_date")
+        if acceptance_end_date:
+            try:
+                if isinstance(acceptance_end_date, str):
+                    if 'T' in acceptance_end_date:
+                        end_date = datetime.fromisoformat(acceptance_end_date.replace('Z', '+00:00'))
+                    else:
+                        end_date = datetime.strptime(acceptance_end_date, "%Y-%m-%d")
+                else:
+                    end_date = acceptance_end_date
+                
+                if end_date.tzinfo is None:
+                    end_date = end_date.replace(tzinfo=timezone.utc)
+                
+                now = datetime.now(timezone.utc)
+                if end_date < now:
+                    logger.warning(f"acceptance_end_date is in the past, setting to 7 days from now")
+                    acceptance_end_date = (now + timedelta(days=7)).isoformat()
+                else:
+                    days_diff = (end_date - now).days
+                    if days_diff < 7:
+                        logger.warning(f"acceptance_end_date is only {days_diff} days from now, setting to 7 days")
+                        acceptance_end_date = (now + timedelta(days=7)).isoformat()
+                    else:
+                        acceptance_end_date = end_date.isoformat()
+            except Exception as e:
+                logger.error(f"Error parsing acceptance_end_date: {e}")
+                acceptance_end_date = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+        else:
+            days = args.get("acceptance_end_days", 7)
+            if days < 7:
+                days = 7
+                logger.info(f"acceptance_end_days {args.get('acceptance_end_days')} < 7, setting to 7")
+            acceptance_end_date = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+        
         data = {
             "type": args.get("type", 1),
             "tradingType": trading_type,
             "name": args.get("name"),
+            "description": args.get("description", ""),
             "openType": args.get("open_type", 0),
             "currency": args.get("currency", "RUB"),
-            "acceptanceEndDate": args.get("acceptance_end_date") or (
-                (datetime.now(timezone.utc) + timedelta(days=args.get("acceptance_end_days", 7))).isoformat()
-            ),
-            "ApproximateDeadlineForSummingUp": args.get("approximate_deadline_for_summing_up", 5),
+            "acceptanceEndDate": acceptance_end_date,
+            "approximateDeadlineForSummingUp": args.get("approximate_deadline_for_summing_up", 5),
             "contacts": args.get("contacts", f"Контактное лицо: {settings_env.bidzaar_user_email}"),
             "users": [
                 {
@@ -865,83 +966,133 @@ async def create_procedure_handler(args: Dict) -> Dict:
                     "isResponsible": True,
                     "isResponsibleForApplications": True
                 }
-            ]
+            ],
+            # Поля с значениями по умолчанию
+            "emoji": args.get("emoji", None),
+            "isArchived": False,
+            "specialCondition": args.get("special_condition", None),
+            "code": None,
+            "status": 0 if is_draft else 1,
+            "linkedProcedures": args.get("linked_procedures", []),
+            "participantQuestionnaireEnabled": args.get("participant_questionnaire_enabled", False),
+            "participantQuestionnaire": args.get("participant_questionnaire", []),
+            "participantApplicationFiles": args.get("participant_application_files", False),
+            "otherParticipantsVisibility": args.get("other_participants_visibility", 0),
+            "vatEnabled": args.get("vat_enabled", False),
+            "alternativeProposals": args.get("alternative_proposals", 0),
+            "additionalCurrencies": args.get("additional_currencies", []),
+            "prolongationTime": args.get("prolongation_time", 0),
+            "acceptanceEndNotificationHours": args.get("acceptance_end_notification_hours", 0),
+            "additionalAcceptanceEndNotificationHours": args.get("additional_acceptance_end_notification_hours", 0),
+            "participantDocumentsAcceptancePeriod": args.get("participant_documents_acceptance_period", None),
+            "ownerVisibility": args.get("owner_visibility", 0),
+            "ndaEnabled": args.get("nda_enabled", False),
+            "ndaDescription": args.get("nda_description", None),
+            "ndaFiles": args.get("nda_files", []),
+            "deliveryAddresses": args.get("delivery_addresses", []),
+            "tags": args.get("tags", []),
+            "commonFiles": args.get("common_files", []),
+            "questionnaireEnabled": args.get("questionnaire_enabled", False),
+            "questionnaire": args.get("questionnaire", []),
+            "proposalRankMethod": args.get("proposal_rank_method", 0),
+            "proposalRankOrder": args.get("proposal_rank_order", 0),
+            "proposalRankEmail": args.get("proposal_rank_email", None),
+            "proposalRankNotificationEnabled": args.get("proposal_rank_notification_enabled", True),
+            "proposalRankFile": args.get("proposal_rank_file", None),
+            "comment": args.get("comment", None),
+            "budget": args.get("budget", None),
+            "identifier": args.get("identifier", None),
+            "categories": args.get("categories", []),
+            "cultureName": args.get("culture_name", "ru"),
+            "segmentId": args.get("segment_id", None),
+            "submissionStartDate": args.get("submission_start_date", None)
         }
         
-        # Для торгов с позициями (tradingType: 1, 2, 8)
-        if trading_type in [1, 2, 8] and has_positions:
-            data["positionsEnabled"] = True
-            data["positionGroups"] = []
-            
-            # Группируем позиции (можно сделать несколько групп, пока одна)
-            group = {
-                "originId": str(uuid.uuid4()),
-                "name": "Основная группа",
-                "deviationType": 0,
-                "betStep": args.get("bet_step", 0.1),
-                "additionalFields": args.get("additional_fields", []),
-                "positions": []
-            }
-            
-            for p in args["positions"]:
-                position = {
-                    "originId": str(uuid.uuid4()),
-                    "name": p.get("name", "Товар"),
-                    "count": float(p.get("count", 1)),
-                    "unit": p.get("unit", "шт."),
-                    "price": float(p.get("price", 0)),
-                    "additionalFieldsValues": p.get("additional_fields_values", [])
-                }
-                group["positions"].append(position)
-            
-            data["positionGroups"].append(group)
         
-        # Для ПКО (tradingType=4) - без позиций
+        # Для типов с позициями (1, 2, 8)
+        if trading_type in [1, 2, 8]:
+            if has_positions:
+                # С позициями
+                data["positionsEnabled"] = True
+                data["positionGroups"] = []
+                
+                group = {
+                    "originId": str(uuid.uuid4()),
+                    "name": args.get("group_name", "Основная группа"),
+                    "deviationType": args.get("deviation_type", 0),
+                    "betUpDown": args.get("bet_up_down", True),
+                    "betStep": args.get("bet_step", 0.01),
+                    "betStepType": args.get("bet_step_type", 1),
+                    "betReference": args.get("bet_reference", 0),
+                    "betPrice": args.get("bet_price", 0),
+                    "participantFiles": args.get("participant_files", False),
+                    "additionalFields": args.get("additional_fields", []),
+                    "positions": []
+                }
+                
+                for p in args["positions"]:
+                    position = {
+                        "originId": str(uuid.uuid4()),
+                        "name": p.get("name", "Товар"),
+                        "description": p.get("description", ""),
+                        "count": float(p.get("count", 1)),
+                        "unit": p.get("unit", "шт."),
+                        "price": float(p.get("price", 0)),
+                        "betPrice": float(p.get("bet_price", 0)),
+                        "additionalFieldsValues": p.get("additional_fields_values", []),
+                        "files": p.get("files", [])
+                    }
+                    group["positions"].append(position)
+                
+                data["positionGroups"].append(group)
+            else:
+                # Без позиций
+                data["positionsEnabled"] = False
+                data["betUpDown"] = args.get("bet_up_down", True)
+                data["betStep"] = args.get("bet_step", 0.01)
+                data["betStepType"] = args.get("bet_step_type", 1)
+                data["betReference"] = args.get("bet_reference", 0)
+                data["betPrice"] = args.get("bet_price", 0)
+        
+        # Для ПКО (tradingType=4)
         elif trading_type == 4:
             data["positionsEnabled"] = False
-            data["BetStep"] = args.get("bet_step", 0.1)
-        
-        # Для торгов заданного объема без позиций (tradingType=1 без позиций)
-        elif trading_type == 1 and not has_positions:
-            data["positionsEnabled"] = False
-            data["BetStep"] = args.get("bet_step", 0.1)
-        
-        # Для реестра (tradingType=16)
-        elif trading_type == 16:
-            data["positionsEnabled"] = False
-            data["participantQuestionnaireEnabled"] = True
-            data["participantQuestionnaire"] = [{
-                "originId": str(uuid.uuid4()),
-                "text": "Основная информация",
-                "items": [{
-                    "originId": str(uuid.uuid4()),
-                    "text": "Согласие на обработку данных",
-                    "type": "agreement",
-                    "agreementText": "Я согласен на обработку моих персональных данных",
-                    "required": True,
-                    "private": False,
-                    "canAttachFiles": False,
-                    "canLeaveComment": False,
-                    "files": []
-                }]
-            }]
-        
-        elif trading_type == 8 and not has_positions:
-            data["positionsEnabled"] = False
-            data["otherParticipantsVisibility"] = 3
-      
-        if args.get("tags"):
-            data["tags"] = args["tags"]
-        
-        # дополнительные поля для торгов заданного объема
-        if trading_type == 1:
             data["betUpDown"] = args.get("bet_up_down", True)
             data["betStep"] = args.get("bet_step", 0.01)
             data["betStepType"] = args.get("bet_step_type", 1)
             data["betReference"] = args.get("bet_reference", 0)
             data["betPrice"] = args.get("bet_price", 0)
+            # Для ПКО обязательно нужно указать questionnaire или participantApplicationFiles
+            if not data.get("participantQuestionnaireEnabled") and not data.get("participantApplicationFiles"):
+                data["participantApplicationFiles"] = True
         
-        logger.info(f"Sending to API: {json.dumps(data, ensure_ascii=False, default=str)[:1000]}")
+        # Для реестра (tradingType=16)
+        elif trading_type == 16:
+            data["positionsEnabled"] = False
+            data["participantQuestionnaireEnabled"] = True
+            if not data.get("participantQuestionnaire"):
+                data["participantQuestionnaire"] = [{
+                    "originId": str(uuid.uuid4()),
+                    "text": "Основная информация",
+                    "items": [{
+                        "originId": str(uuid.uuid4()),
+                        "text": "Согласие на обработку данных",
+                        "type": "agreement",
+                        "agreementText": "Я согласен на обработку моих персональных данных",
+                        "required": True,
+                        "private": False,
+                        "canAttachFiles": False,
+                        "canLeaveComment": False,
+                        "files": []
+                    }]
+                }]
+        
+        # Для мониторинга рынка (tradingType=8) без позиций
+        if trading_type == 8 and not has_positions:
+            data["otherParticipantsVisibility"] = 3
+        
+        
+        logger.info(f"Sending to API: {json.dumps(data, ensure_ascii=False, default=str)[:2000]}")
         
         if is_draft:
             endpoint = "procedures/draft"
@@ -969,8 +1120,15 @@ async def create_procedure_handler(args: Dict) -> Dict:
         logger.error(f"Failed to create procedure: {e}", exc_info=True)
         return {"error": str(e)}
 
+
+async def predict_and_apply_handler(args: Dict) -> Dict:
+    params = None
+    return client.request("POST", f"tags/{args['procedure_id']}/predict-and-apply")
+
+
 async def get_procedure_handler(args: Dict) -> Dict:
     return client.request("GET", f"procedures/{args['procedure_id']}")
+
 
 async def update_procedure_handler(args: Dict) -> Dict:
     procedure_id = args.pop("procedure_id")
@@ -981,17 +1139,21 @@ async def update_procedure_handler(args: Dict) -> Dict:
         params["rollbackProposals"] = args.pop("rollback_proposals")
     return client.request("PATCH", f"procedures/{procedure_id}", params=params if params else None, json_data=args)
 
+
 async def delete_procedure_draft_handler(args: Dict) -> Dict:
     client.request("DELETE", f"procedures/{args['procedure_id']}")
     return {"success": True, "message": "Draft deleted"}
+
 
 async def publish_procedure_handler(args: Dict) -> Dict:
     params = {"publishDate": args["publish_date"]} if args.get("publish_date") else None
     return client.request("POST", f"procedures/{args['procedure_id']}/publish", params=params)
 
+
 async def get_proposals_ids_handler(args: Dict) -> List[str]:
     params = {"sortType": args["sort_type"]} if args.get("sort_type") else None
     return client.request("GET", f"procedures/{args['procedure_id']}/proposals-ids", params=params)
+
 
 async def get_proposals_handler(args: Dict) -> List[Dict]:
     params = {"ids": args["proposal_ids"]}
@@ -999,8 +1161,10 @@ async def get_proposals_handler(args: Dict) -> List[Dict]:
         params["withFakePositions"] = "true"
     return client.request("GET", f"procedures/{args['procedure_id']}/proposals", params=params)
 
+
 async def get_proposals_ranks_handler(args: Dict) -> Dict:
     return client.request("GET", f"procedures/{args['procedure_id']}/proposals/ranks")
+
 
 async def rollback_proposal_handler(args: Dict) -> Dict:
     data = {
@@ -1009,11 +1173,14 @@ async def rollback_proposal_handler(args: Dict) -> Dict:
     }
     return client.request("POST", f"procedures/{args['procedure_id']}/proposals/{args['proposal_id']}/rollback-proposal", json_data=data)
 
+
 async def get_participants_handler(args: Dict) -> List[Dict]:
     return client.request("GET", f"procedures/{args['procedure_id']}/participants")
 
+
 async def invite_participants_handler(args: Dict) -> List[Dict]:
     return client.request("POST", f"procedures/{args['procedure_id']}/participants/bytinemail", json_data=args["invitations"])
+
 
 async def block_participants_handler(args: Dict) -> Dict:
     data = {
@@ -1023,9 +1190,11 @@ async def block_participants_handler(args: Dict) -> Dict:
     client.request("PUT", f"procedures/{args['procedure_id']}/participants/block", json_data=data)
     return {"success": True}
 
+
 async def unblock_participants_handler(args: Dict) -> Dict:
     client.request("PUT", f"procedures/{args['procedure_id']}/participants/unblock", json_data=args["participant_ids"])
     return {"success": True}
+
 
 async def approve_participants_handler(args: Dict) -> Dict:
     data = {"participants": args["participant_ids"], "comment": args.get("comment")}
@@ -1034,13 +1203,16 @@ async def approve_participants_handler(args: Dict) -> Dict:
     client.request("PUT", f"procedures/{args['procedure_id']}/participants/accept", json_data=data)
     return {"success": True}
 
+
 async def reject_participants_handler(args: Dict) -> Dict:
     data = {"participants": args["participant_ids"], "comment": args.get("comment")}
     client.request("PUT", f"procedures/{args['procedure_id']}/participants/reject", json_data=data)
     return {"success": True}
 
+
 async def get_blocked_participants_handler(args: Dict) -> List[Dict]:
     return client.request("GET", f"procedures/{args['procedure_id']}/participants/blocked")
+
 
 async def get_events_handler(args: Dict) -> List[Dict]:
     params = {}
@@ -1053,6 +1225,7 @@ async def get_events_handler(args: Dict) -> List[Dict]:
     if args.get("stage_id"):
         params["StageId"] = args["stage_id"]
     return client.request("GET", "events", params=params)
+
 
 async def complete_with_winners_handler(args: Dict) -> Dict:
     data = {
@@ -1148,21 +1321,63 @@ async def send_chat_message_handler(args: Dict) -> Dict:
 
 
 async def upload_files_handler(args: Dict) -> List[Dict]:
-    """Upload files to storage"""
+    """
+    Upload files to Bidzaar storage.
+    Supports formats: doc, docx, xls, xlsx, pdf, txt, csv, pptx, dwg, jpg, png, gif, bmp, tiff, svg, webp, zip, rar, 7z.
+    """
     import base64
-    files = []
-    for f in args["files"]:
-        file_data = base64.b64decode(f["base64"])
-        files.append(("files", (f["name"], file_data, "application/octet-stream")))
     
-    headers = {
-        'Authorization': f'Bearer {client.access_token}',
-        'X-Bidzaar-Connector-User-Email': client.config.user_email
-    }
-    url = client._get_api_url("files/upload")
-    response = client.session.post(url, files=files, headers=headers)
-    response.raise_for_status()
-    return response.json()
+    logger.info(f"Uploading {len(args['files'])} file(s)")
+    
+    try:
+        
+        client._ensure_token()
+        
+        files = []
+        for f in args["files"]:
+            file_data = base64.b64decode(f["base64"])
+            mime_type = f.get("mime_type", "application/octet-stream")
+            files.append(("files", (f["name"], file_data, mime_type)))
+            logger.debug(f"   File: {f['name']}, size: {len(file_data)} bytes")
+        
+        
+        headers = {
+            'Authorization': f'Bearer {client.access_token}',
+            'X-Bidzaar-Connector-User-Email': client.config.user_email
+        }
+        
+        url = client._get_api_url("files/upload")
+        
+    
+        response = client.session.post(
+            url, 
+            files=files, 
+            headers=headers,
+            timeout=60
+        )
+        
+        # Если 401 - пробуем обновить токен и повторить
+        if response.status_code == 401:
+            logger.warning("Token expired, refreshing...")
+            client._refresh_token()
+            headers['Authorization'] = f'Bearer {client.access_token}'
+            response = client.session.post(url, files=files, headers=headers, timeout=60)
+        
+        response.raise_for_status()
+        
+        result = response.json()
+        logger.info(f"Files uploaded successfully: {len(result)} file(s)")
+        return result
+        
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP Error: {e}")
+        if e.response is not None:
+            logger.error(f"Response status: {e.response.status_code}")
+            logger.error(f"Response body: {e.response.text}")
+        return {"error": str(e), "status_code": e.response.status_code if e.response else None}
+    except Exception as e:
+        logger.error(f"Error uploading files: {e}", exc_info=True)
+        return {"error": str(e)}
 
 
 async def get_file_handler(args: Dict) -> str:
@@ -1252,13 +1467,15 @@ async def reject_price_change_request_handler(args: Dict) -> None:
     return {"success": True}
 
 
-# MCP call handle
+# ============================================================================
+# MCP CALL HANDLER
+# ============================================================================
 
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[types.TextContent]:
     try:
         result = await execute_tool(name, arguments)
-        # ВСЕГДА сериализуем в JSON с двойными кавычками
+        
         if isinstance(result, (dict, list)):
             text = json.dumps(result, ensure_ascii=False)
         else:
@@ -1267,6 +1484,9 @@ async def call_tool(name: str, arguments: Any) -> list[types.TextContent]:
     except Exception as e:
         return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
 
+# ============================================================================
+# MAIN
+# ============================================================================
 
 async def main():
     """Main entry point"""
