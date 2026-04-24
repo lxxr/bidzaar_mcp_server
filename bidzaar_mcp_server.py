@@ -7,9 +7,8 @@ Created on Fri Feb 20 17:42:41 2026
 """
 """
 MCP Server for Bidzaar Connector API (stdio)
-Implements Bidzaar API v5.2
+Implements Bidzaar API v5.3
 """
-
 import os
 import json
 import asyncio
@@ -19,15 +18,17 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, asdict
 import requests
+import base64   
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# MCP imports
 from mcp.server import Server, NotificationOptions
 from mcp.server.models import InitializationOptions
 import mcp.server.stdio
 import mcp.types as types
 import sys
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -35,7 +36,7 @@ import sys
 
 class Settings_env(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file="/path/to/mcp/bidzaar/.env",
         env_file_encoding="utf-8",
         case_sensitive=False,
     )
@@ -45,6 +46,7 @@ class Settings_env(BaseSettings):
     bidzaar_client_secret: str
     bidzaar_api_version: str
     bidzaar_user_email: str
+    bidzaar_files_base_path: str
     
 settings_env = Settings_env()
 
@@ -70,6 +72,8 @@ class BidzaarConfig:
     client_secret: str = settings_env.bidzaar_client_secret
     user_email: str = settings_env.bidzaar_user_email
     api_version: str = settings_env.bidzaar_api_version
+    bidzaar_files_base_path: str = settings_env.bidzaar_files_base_path
+
     token_expiry_buffer: int = 60
 
 
@@ -84,6 +88,7 @@ class BidzaarClient:
     
     def _get_auth_url(self) -> str:
         return f"{self.config.base_url}/auth/connect/token"
+    
     
     def _get_api_url(self, endpoint: str) -> str:
         return f"{self.config.base_url}/api/connector/v{self.config.api_version}/{endpoint.lstrip('/')}"
@@ -158,31 +163,365 @@ app = Server("bidzaar-mcp-server")
 client = BidzaarClient(BidzaarConfig())
 
 # ============================================================================
-# TOOL DEFINITIONS 
+# TOOL DEFINITIONS
 # ============================================================================
 
 @app.list_tools()
 async def list_tools() -> list[types.Tool]:
     """List all available Bidzaar API tools"""
     return [
-        # ========== PROCEDURE MANAGEMENT ==========
+
         types.Tool(
             name="create_procedure",
-            description="Create a new procurement procedure on Bidzaar platform. Supports draft creation or immediate publishing. Required fields: name, type (1=procurement, 2=sale, 3=registry), trading_type (1=fixed_volume (rfp), 2=per_unit (rfq), 4=PCO (qulification), 8=market_monitoring (rfi), 16=registry). Optional: positions array with name, count, unit, price.",
+            description="Create a new procurement procedure on Bidzaar platform. Supports draft creation or immediate publishing.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Procedure name, max 600 chars"},
-                    "type": {"type": "integer", "description": "Procedure type: 1=procurement, 2=sale, 3=registry"},
-                    "trading_type": {"type": "integer", "description": "Trading type: 1=fixed_volume (rfp), 2=per_unit (rfq), 4=PCO (qualification), 8=market_monitoring (rfi), 16=registry"},
-                    "description": {"type": "string", "description": "HTML description, max 4088 chars"},
-                    "open_type": {"type": "integer", "description": "0=open (all suppliers), 1=closed (invited only)", "default": 0},
-                    "currency": {"type": "string", "description": "Currency: RUB, USD, EUR, etc", "default": "RUB"},
-                    "acceptance_end_date": {"type": "string", "description": "ISO 8601 end date for proposal submission"},
-                    "positions": {"type": "array", "items": {"type": "object"}, "description": "Array of positions with name, count, unit, price"},
-                    "publish_immediately": {"type": "boolean", "description": "Publish immediately or create draft", "default": True}
+                    # ========== ОСНОВНЫЕ ПОЛЯ ==========
+                    "name": {
+                        "type": "string",
+                        "description": "Procedure name, max 600 chars"
+                    },
+                    "type": {
+                        "type": "integer",
+                        "description": "Procedure type: 1=procurement(rfp, rfq, pco) or market monitoring (rfi), 2=sell owned goods, 3=regestry of supplyers",
+                        "default": 1
+                    },
+                    "trading_type": {
+                        "type": "integer",
+                        "description": "Trading type: 1=fixed_volume (rfp), 2=per_unit (rfq), 4=PCO (qualification), 8=market_monitoring (rfi), 16=registry",
+                        "default": 8
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "HTML description, max 4088 chars"
+                    },
+                    "open_type": {
+                        "type": "integer",
+                        "description": "0=open (all suppliers), 1=closed (invited only)",
+                        "default": 0
+                    },
+                    "currency": {
+                        "type": "string",
+                        "description": "Currency: RUB, USD, EUR, etc",
+                        "default": "RUB"
+                    },
+                    "contacts": {
+                        "type": "string",
+                        "description": "Contact information: names, phones, emails"
+                    },
+                    
+                    # ========== ДАТЫ ==========
+                    "acceptance_end_date": {
+                        "type": "string",
+                        "description": "ISO 8601 end date for proposal submission (YYYY-MM-DDTHH:MM:SSZ)"
+                    },
+                    "acceptance_end_days": {
+                        "type": "integer",
+                        "description": "Number of days for proposal submission (alternative to acceptance_end_date)",
+                        "default": 7
+                    },
+                    "approximate_deadline_for_summing_up": {
+                        "type": "integer",
+                        "description": "Days for summing up results",
+                        "default": 5
+                    },
+                    "submission_start_date": {
+                        "type": "string",
+                        "description": "ISO 8601 start date for proposal submission"
+                    },
+                    
+                    # ========== ПОЗИЦИИ ==========
+                    "positions_enabled": {
+                        "type": "boolean",
+                        "description": "Enable position specification",
+                        "default": True
+                    },
+                    "positions": {
+                        "type": "array",
+                        "description": "Array of positions",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "Position name"},
+                                "count": {"type": "number", "description": "Quantity", "default": 1},
+                                "unit": {"type": "string", "description": "Unit of measurement", "default": "шт."},
+                                "price": {"type": "number", "description": "Price per unit", "default": 0},
+                                "description": {"type": "string", "description": "Position description"},
+                                "bet_price": {"type": "number", "description": "Bid price for position", "default": 0},
+                                "files": {
+                                    "type": "array",
+                                    "description": "Files for this position",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {"type": "string", "description": "Uploaded file id"},
+                                            "name": {"type": "string", "description": "File name"},
+                                            "extension": {"type": "string", "description": "File extension"},
+                                            "length": {"type": "integer", "description": "File size in bytes"}
+                                        }
+                                    }
+                                },
+                                "additional_fields_values": {
+                                    "type": "array",
+                                    "description": "Additional field values",
+                                    "items": {"type": "object"}
+                                }
+                            }
+                        }
+                    },
+                    
+                    # ========== ФАЙЛЫ ==========
+                    "common_files": {
+                        "type": "array",
+                        "description": "Common files for the procedure (technical specifications, terms, etc.)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "description": "Uploaded file id from /files/upload"},
+                                "name": {"type": "string", "description": "File name"},
+                                "extension": {"type": "string", "description": "File extension"},
+                                "length": {"type": "integer", "description": "File size in bytes"}
+                            },
+                            "required": ["id", "name", "extension","length"]
+                        }
+                    },
+                    
+                    # ========== ТЕГИ ==========
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tags for the procedure"
+                    },
+                    
+                    # ========== НАСТРОЙКИ ТОРГОВ ==========
+                    "bet_up_down": {
+                        "type": "boolean",
+                        "description": "Can participants both increase and decrease price",
+                        "default": True
+                    },
+                    "bet_step": {
+                        "type": "number",
+                        "description": "Minimum bid step (for trading_type=1,2,4)",
+                        "default": 0.01
+                    },
+                    "bet_step_type": {
+                        "type": "integer",
+                        "description": "0=percentage, 1=currency",
+                        "default": 1
+                    },
+                    "bet_reference": {
+                        "type": "integer",
+                        "description": "0=from own proposal, 1=from best proposal",
+                        "default": 0
+                    },
+                    "bet_price": {
+                        "type": "number",
+                        "description": "Expected/max/min bid price",
+                        "default": 0
+                    },
+                    
+                    # ========== УЧАСТНИКИ И ВИДИМОСТЬ ==========
+                    "other_participants_visibility": {
+                        "type": "integer",
+                        "description": "0=own only, 1=own rank, 2=competitors without names, 3=competitors with names, 4=best prices, 5=rank and best prices",
+                        "default": 0
+                    },
+                    "owner_visibility": {
+                        "type": "integer",
+                        "description": "0=organizer sees proposals, 1=organizer does not see proposals",
+                        "default": 0
+                    },
+                    "vat_enabled": {
+                        "type": "boolean",
+                        "description": "Consider VAT when selecting winner: false=without VAT, true=with VAT",
+                        "default": False
+                    },
+                    "alternative_proposals": {
+                        "type": "integer",
+                        "description": "Number of alternative proposals allowed (max 10, 0=disabled)",
+                        "default": 0
+                    },
+                    
+                    # ========== АВТОПРОДЛЕНИЕ И УВЕДОМЛЕНИЯ ==========
+                    "prolongation_time": {
+                        "type": "number",
+                        "description": "Auto-prolongation in minutes (max 99, 0=disabled)",
+                        "default": 0
+                    },
+                    "acceptance_end_notification_hours": {
+                        "type": "integer",
+                        "description": "Hours before end to notify participants (max 99, 0=disabled)",
+                        "default": 0
+                    },
+                    "additional_acceptance_end_notification_hours": {
+                        "type": "integer",
+                        "description": "Additional notification hours before end",
+                        "default": 0
+                    },
+                    
+                    # ========== NDA ==========
+                    "nda_enabled": {
+                        "type": "boolean",
+                        "description": "Enable NDA/pre-qualification stage",
+                        "default": False
+                    },
+                    "nda_description": {
+                        "type": "string",
+                        "description": "NDA description (HTML, required if nda_enabled=True)"
+                    },
+                    "nda_files": {
+                        "type": "array",
+                        "description": "NDA documents",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "name": {"type": "string"},
+                                "extension": {"type": "string"},
+                                "length": {"type": "integer"}
+                            }
+                        }
+                    },
+                    
+                    # ========== АНКЕТА УЧАСТНИКА ==========
+                    "participant_questionnaire_enabled": {
+                        "type": "boolean",
+                        "description": "Enable participant questionnaire",
+                        "default": False
+                    },
+                    "participant_questionnaire": {
+                        "type": "array",
+                        "description": "Participant questionnaire sections",
+                        "items": {"type": "object"}
+                    },
+                    "participant_application_files": {
+                        "type": "boolean",
+                        "description": "Allow document attachments to application",
+                        "default": False
+                    },
+                    
+                    # ========== НЕЦЕНОВЫЕ КРИТЕРИИ ==========
+                    "questionnaire_enabled": {
+                        "type": "boolean",
+                        "description": "Enable non-price criteria questionnaire",
+                        "default": False
+                    },
+                    "questionnaire": {
+                        "type": "array",
+                        "description": "Non-price criteria questionnaire",
+                        "items": {"type": "object"}
+                    },
+                    
+                    # ========== РАНЖИРОВАНИЕ ==========
+                    "proposal_rank_method": {
+                        "type": "integer",
+                        "description": "0=by price and time, 1=by price, 2=custom method",
+                        "default": 0
+                    },
+                    "proposal_rank_order": {
+                        "type": "integer",
+                        "description": "0=highest score first, 1=lowest score first",
+                        "default": 0
+                    },
+                    "proposal_rank_email": {
+                        "type": "string",
+                        "description": "Email for ranking error notifications"
+                    },
+                    "proposal_rank_notification_enabled": {
+                        "type": "boolean",
+                        "description": "Enable ranking error notifications",
+                        "default": True
+                    },
+                    "proposal_rank_file": {
+                        "type": "object",
+                        "description": "Custom ranking method file",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "name": {"type": "string"},
+                            "extension": {"type": "string"},
+                            "length": {"type": "integer"}
+                        }
+                    },
+                    
+                    # ========== ДОПОЛНИТЕЛЬНЫЕ ВАЛЮТЫ ==========
+                    "additional_currencies": {
+                        "type": "array",
+                        "description": "Additional currencies",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "currency": {"type": "string"},
+                                "amount": {"type": "number"},
+                                "rate": {"type": "number"}
+                            }
+                        }
+                    },
+                    
+                    # ========== АДРЕСА ДОСТАВКИ ==========
+                    "delivery_addresses": {
+                        "type": "array",
+                        "description": "Delivery addresses",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "country": {"type": "string"},
+                                "region": {"type": "string"},
+                                "area": {"type": "string"},
+                                "cityType": {"type": "string"},
+                                "city": {"type": "string"},
+                                "building": {"type": "string"},
+                                "addressComment": {"type": "string"}
+                            }
+                        }
+                    },
+                    
+                    # ========== СВЯЗАННЫЕ ПРОЦЕДУРЫ ==========
+                    "linked_procedures": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Linked procedure UUIDs"
+                    },
+                    
+                    # ========== ДРУГИЕ НАСТРОЙКИ ==========
+                    "participant_documents_acceptance_period": {
+                        "type": "integer",
+                        "description": "Hours for document submission after proposal acceptance"
+                    },
+                    "comment": {
+                        "type": "string",
+                        "description": "Internal procedure comment (max 1024 chars)"
+                    },
+                    "budget": {
+                        "type": "number",
+                        "description": "Procedure budget (for per_unit trading type)"
+                    },
+                    "identifier": {
+                        "type": "string",
+                        "description": "External identifier (max 32 chars)"
+                    },
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Category UUIDs"
+                    },
+                    "segment_id": {
+                        "type": "string",
+                        "description": "Business segment UUID"
+                    },
+                    "emoji": {
+                        "type": "string",
+                        "description": "Emoji icon (1 char)"
+                    },
+                    
+                    # ========== ПУБЛИКАЦИЯ ==========
+                    "publish_immediately": {
+                        "type": "boolean",
+                        "description": "Publish immediately or create draft",
+                        "default": True
+                    }
                 },
-                "required": ["name", "type", "trading_type"]
+                "required": ["name"]
             }
         ),
         types.Tool(
@@ -196,23 +535,349 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["procedure_id"]
             }
         ),
-        
         types.Tool(
             name="update_procedure",
-            description="Update existing procedure parameters. Can modify name, description, end date, positions, etc. For published procedures, changes will cause republication. Use custom_mail to notify participants.",
+            description="Update existing procedure parameters. Can modify name, description, end date, positions, tags, contacts, and other settings. For published procedures, changes will cause republication except for 'contacts', 'tags', 'additionalCurrencies'. Use custom_mail to notify participants. Note: type and tradingType cannot be changed after creation.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure to update"},
-                    "name": {"type": "string", "description": "New procedure name"},
-                    "description": {"type": "string", "description": "New HTML description"},
-                    "acceptance_end_date": {"type": "string", "description": "New end date ISO 8601"},
-                    "custom_mail": {"type": "string", "description": "Message to send to all participants"},
-                    "rollback_proposals": {"type": "boolean", "description": "Whether to reject existing proposals"}
+                    # ========== ОСНОВНЫЕ ПОЛЯ ==========
+                    "procedure_id": {
+                        "type": "string",
+                        "description": "UUID of the procedure to update (required)"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "New procedure name, max 600 chars"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "New HTML description, max 4088 chars. Empty string to delete."
+                    },
+                    "acceptance_end_date": {
+                        "type": "string",
+                        "description": "New end date for proposal submission (ISO 8601: YYYY-MM-DDTHH:mm:ss.sssZ)"
+                    },
+                    "open_type": {
+                        "type": "integer",
+                        "description": "0=open (all suppliers), 1=closed (invited only)"
+                    },
+                    "currency": {
+                        "type": "string",
+                        "description": "Currency: RUB, USD, EUR, etc"
+                    },
+                    "contacts": {
+                        "type": "string",
+                        "description": "Contact information (max 2048 chars). Null to delete. Changes do NOT cause republication."
+                    },
+                    "emoji": {
+                        "type": "string",
+                        "description": "Emoji icon (1 char)"
+                    },
+                    
+                    # ========== ДАТЫ ==========
+                    "approximate_deadline_for_summing_up": {
+                        "type": "number",
+                        "description": "Days for summing up results (min 1, max 45)"
+                    },
+                    "submission_start_date": {
+                        "type": "string",
+                        "description": "ISO 8601 start date for proposal submission"
+                    },
+                    
+                    # ========== ФАЙЛЫ ==========
+                    "common_files": {
+                        "type": "array",
+                        "description": "Common files for the procedure. Empty array to delete.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "description": "Uploaded file id"},
+                                "name": {"type": "string", "description": "File name"},
+                                "extension": {"type": "string", "description": "File extension"},
+                                "length": {"type": "integer", "description": "File size in bytes"}
+                            }
+                        }
+                    },
+                    
+                    # ========== ТЕГИ ==========
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tags for the procedure (max 50 chars each). Empty array to delete. Changes do NOT cause republication."
+                    },
+                    
+                    # ========== ПОЗИЦИИ ==========
+                    "positions_enabled": {
+                        "type": "boolean",
+                        "description": "Enable position specification. WARNING: Changing this is a major change!"
+                    },
+                    "position_groups": {
+                        "type": "array",
+                        "description": "Position groups. Complete replacement of existing groups.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "origin_id": {"type": "string", "description": "Unique identifier for the group (UUID)"},
+                                "name": {"type": "string", "description": "Group name"},
+                                "deviation_type": {"type": "integer", "description": "0=all positions required, 1=with deviation, 2=partial submission"},
+                                "bet_up_down": {"type": "boolean", "description": "Can both increase and decrease price"},
+                                "bet_step": {"type": "number", "description": "Minimum bid step"},
+                                "bet_step_type": {"type": "integer", "description": "0=percentage, 1=currency"},
+                                "bet_reference": {"type": "integer", "description": "0=from own, 1=from best"},
+                                "bet_price": {"type": "number", "description": "Expected/max/min bid price"},
+                                "participant_files": {"type": "boolean", "description": "Allow participants to attach files"},
+                                "additional_fields": {"type": "array", "description": "Additional fields for positions"},
+                                "positions": {
+                                    "type": "array",
+                                    "description": "Positions in this group",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "origin_id": {"type": "string", "description": "Unique identifier for position (UUID)"},
+                                            "name": {"type": "string", "description": "Position name"},
+                                            "description": {"type": "string", "description": "Position description"},
+                                            "count": {"type": "number", "description": "Quantity"},
+                                            "unit": {"type": "string", "description": "Unit of measurement"},
+                                            "price": {"type": "number", "description": "Price per unit"},
+                                            "bet_price": {"type": "number", "description": "Bid price"},
+                                            "additional_fields_values": {"type": "array", "description": "Additional field values"},
+                                            "files": {
+                                                "type": "array",
+                                                "description": "Files for this position",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "id": {"type": "string"},
+                                                        "name": {"type": "string"},
+                                                        "extension": {"type": "string"},
+                                                        "length": {"type": "integer"}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    
+                    # ========== НАСТРОЙКИ ТОРГОВ (без позиций) ==========
+                    "bet_up_down": {
+                        "type": "boolean",
+                        "description": "Can participants both increase and decrease price (when positions_enabled=false)"
+                    },
+                    "bet_step": {
+                        "type": "number",
+                        "description": "Minimum bid step (when positions_enabled=false)"
+                    },
+                    "bet_step_type": {
+                        "type": "integer",
+                        "description": "0=percentage, 1=currency (when positions_enabled=false)"
+                    },
+                    "bet_reference": {
+                        "type": "integer",
+                        "description": "0=from own proposal, 1=from best proposal (when positions_enabled=false)"
+                    },
+                    "bet_price": {
+                        "type": "number",
+                        "description": "Expected/max/min bid price (when positions_enabled=false)"
+                    },
+                    
+                    # ========== УЧАСТНИКИ И ВИДИМОСТЬ ==========
+                    "other_participants_visibility": {
+                        "type": "integer",
+                        "description": "0=own only, 1=own rank, 2=competitors without names, 3=competitors with names, 4=best prices, 5=rank and best prices"
+                    },
+                    "owner_visibility": {
+                        "type": "integer",
+                        "description": "0=organizer sees proposals, 1=organizer does not see proposals"
+                    },
+                    "vat_enabled": {
+                        "type": "boolean",
+                        "description": "Consider VAT when selecting winner: false=without VAT, true=with VAT"
+                    },
+                    "alternative_proposals": {
+                        "type": "integer",
+                        "description": "Number of alternative proposals allowed (max 10, 0=disabled)"
+                    },
+                    
+                    # ========== АВТОПРОДЛЕНИЕ И УВЕДОМЛЕНИЯ ==========
+                    "prolongation_time": {
+                        "type": "number",
+                        "description": "Auto-prolongation in minutes (max 99, 0=disabled)"
+                    },
+                    "acceptance_end_notification_hours": {
+                        "type": "integer",
+                        "description": "Hours before end to notify participants (max 99, 0=disabled)"
+                    },
+                    "additional_acceptance_end_notification_hours": {
+                        "type": "integer",
+                        "description": "Additional notification hours before end"
+                    },
+                    
+                    # ========== ДОПОЛНИТЕЛЬНЫЕ ВАЛЮТЫ ==========
+                    "additional_currencies": {
+                        "type": "array",
+                        "description": "Additional currencies. Cannot remove or change currency after publication. Amount and rate can be changed.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "currency": {"type": "string", "description": "Currency code (cannot change after publication)"},
+                                "amount": {"type": "number", "description": "Amount in additional currency"},
+                                "rate": {"type": "number", "description": "Exchange rate to base currency"}
+                            }
+                        }
+                    },
+                    
+                    # ========== NDA ==========
+                    "nda_enabled": {
+                        "type": "boolean",
+                        "description": "Enable NDA/pre-qualification stage"
+                    },
+                    "nda_description": {
+                        "type": "string",
+                        "description": "NDA description (HTML, required if nda_enabled=True)"
+                    },
+                    "nda_files": {
+                        "type": "array",
+                        "description": "NDA documents",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "name": {"type": "string"},
+                                "extension": {"type": "string"},
+                                "length": {"type": "integer"}
+                            }
+                        }
+                    },
+                    
+                    # ========== АНКЕТА УЧАСТНИКА ==========
+                    "participant_questionnaire_enabled": {
+                        "type": "boolean",
+                        "description": "Enable participant questionnaire"
+                    },
+                    "participant_questionnaire": {
+                        "type": "array",
+                        "description": "Participant questionnaire sections",
+                        "items": {"type": "object"}
+                    },
+                    "participant_application_files": {
+                        "type": "boolean",
+                        "description": "Allow document attachments to application"
+                    },
+                    "participant_documents_acceptance_period": {
+                        "type": "integer",
+                        "description": "Hours for document submission after proposal acceptance"
+                    },
+                    
+                    # ========== НЕЦЕНОВЫЕ КРИТЕРИИ ==========
+                    "questionnaire_enabled": {
+                        "type": "boolean",
+                        "description": "Enable non-price criteria questionnaire"
+                    },
+                    "questionnaire": {
+                        "type": "array",
+                        "description": "Non-price criteria questionnaire",
+                        "items": {"type": "object"}
+                    },
+                    
+                    # ========== РАНЖИРОВАНИЕ ==========
+                    "proposal_rank_method": {
+                        "type": "integer",
+                        "description": "0=by price and time, 1=by price, 2=custom method"
+                    },
+                    "proposal_rank_order": {
+                        "type": "integer",
+                        "description": "0=highest score first, 1=lowest score first"
+                    },
+                    "proposal_rank_email": {
+                        "type": "string",
+                        "description": "Email for ranking error notifications"
+                    },
+                    "proposal_rank_notification_enabled": {
+                        "type": "boolean",
+                        "description": "Enable ranking error notifications"
+                    },
+                    "proposal_rank_file": {
+                        "type": "object",
+                        "description": "Custom ranking method file",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "name": {"type": "string"},
+                            "extension": {"type": "string"},
+                            "length": {"type": "integer"}
+                        }
+                    },
+                    
+                    # ========== АДРЕСА ДОСТАВКИ ==========
+                    "delivery_addresses": {
+                        "type": "array",
+                        "description": "Delivery addresses. Empty array to delete.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "country": {"type": "string"},
+                                "region": {"type": "string"},
+                                "area": {"type": "string"},
+                                "city_type": {"type": "string"},
+                                "city": {"type": "string"},
+                                "building": {"type": "string"},
+                                "address_comment": {"type": "string"}
+                            }
+                        }
+                    },
+                    
+                    # ========== СВЯЗАННЫЕ ПРОЦЕДУРЫ ==========
+                    "linked_procedures": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Linked procedure UUIDs. Empty array to delete."
+                    },
+                    
+                    # ========== ДРУГИЕ НАСТРОЙКИ ==========
+                    "comment": {
+                        "type": "string",
+                        "description": "Internal procedure comment (max 1024 chars). Empty string to delete."
+                    },
+                    "budget": {
+                        "type": "number",
+                        "description": "Procedure budget (for per_unit trading type)"
+                    },
+                    "identifier": {
+                        "type": "string",
+                        "description": "External identifier (max 32 chars)"
+                    },
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Category UUIDs. Empty array to delete."
+                    },
+                    "segment_id": {
+                        "type": "string",
+                        "description": "Business segment UUID"
+                    },
+                    "culture_name": {
+                        "type": "string",
+                        "description": "Deprecated: Language for email notifications: 'ru' or 'en'",
+                        "default": "ru"
+                    },
+                    
+                    # ========== ПАРАМЕТРЫ ЗАПРОСА ==========
+                    "custom_mail": {
+                        "type": "string",
+                        "description": "Message to send to all participants by email and chat (max 1024 chars). Used as query parameter, not in body."
+                    },
+                    "rollback_proposals": {
+                        "type": "boolean",
+                        "description": "Whether to reject existing proposals if changes are major. Used as query parameter, not in body.",
+                        "default": False
+                    }
                 },
                 "required": ["procedure_id"]
             }
-        ),
+        ),      
         types.Tool(
             name="delete_procedure_draft",
             description="Delete a draft procedure. Only works for procedures in draft status (not published).",
@@ -237,57 +902,6 @@ async def list_tools() -> list[types.Tool]:
             }
         ),
         
-        # ========== PROPOSAL MANAGEMENT ==========
-        types.Tool(
-            name="get_proposals_ids",
-            description="Get list of proposal UUIDs for a procedure. Sort options: 0=by price (lowest first), 1=by selection, 2=by satisfaction, 3=by rank, 4=by last update.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"},
-                    "sort_type": {"type": "integer", "description": "Sort type: 0=price, 1=selection, 2=satisfaction, 3=rank, 4=update", "default": 0}
-                },
-                "required": ["procedure_id"]
-            }
-        ),
-        types.Tool(
-            name="get_proposals",
-            description="Get detailed information about specific proposals by their UUIDs. Returns complete proposal data including prices, positions, participant info, and attachments.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"},
-                    "proposal_ids": {"type": "array", "items": {"type": "string"}, "description": "List of proposal UUIDs (max 30)"},
-                    "with_fake_positions": {"type": "boolean", "description": "Include fake positions", "default": False}
-                },
-                "required": ["procedure_id", "proposal_ids"]
-            }
-        ),
-        types.Tool(
-            name="get_proposals_ranks",
-            description="Get calculated ranks for all proposals in a procedure. Returns ranking information for groups and individual items.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"}
-                },
-                "required": ["procedure_id"]
-            }
-        ),
-        types.Tool(
-            name="rollback_proposal",
-            description="Reject a specific proposal. Can optionally allow participant to change price after rejection. Requires organizer permissions.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"},
-                    "proposal_id": {"type": "string", "description": "UUID of the proposal to reject"},
-                    "reason": {"type": "string", "description": "Reason for rejection"},
-                    "allow_change_price": {"type": "boolean", "description": "Allow participant to change price", "default": False}
-                },
-                "required": ["procedure_id", "proposal_id"]
-            }
-        ),
         
         # ========== PARTICIPANT MANAGEMENT ==========
         types.Tool(
@@ -315,12 +929,12 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="block_participants",
-            description="Block participants from submitting proposals. Blocked participants cannot submit and their existing proposals are deleted. Available in 'Proposal Submission' and 'Evaluation' statuses.",
+            description="Block participants from submitting proposals.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "procedure_id": {"type": "string", "description": "UUID of the procedure"},
-                    "participant_ids": {"type": "array", "items": {"type": "string"}, "description": "List of participant UUIDs to block"},
+                    "participant_ids": {"type": "array", "items": {"type": "string"}, "description": "List of participant UUIDs or names to block."},
                     "block_reason": {"type": "string", "description": "Reason for blocking (visible to participant)"}
                 },
                 "required": ["procedure_id", "participant_ids"]
@@ -328,41 +942,27 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="unblock_participants",
-            description="Unblock previously blocked participants. After unblocking, they can submit proposals again.",
+            description="Unblock previously blocked participants.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "procedure_id": {"type": "string", "description": "UUID of the procedure"},
-                    "participant_ids": {"type": "array", "items": {"type": "string"}, "description": "List of participant UUIDs to unblock"}
+                    "participant_ids": {"type": "array", "items": {"type": "string"}, "description": "List of participant UUIDs or names to unblock"}
                 },
                 "required": ["procedure_id", "participant_ids"]
             }
         ),
+ 
         types.Tool(
-            name="approve_participants",
-            description="Approve participants for procedures with application requirements. For registry type procedures, can set expiration date for approval.",
+            name="get_participants_with_details",
+            description="Get list of all participants in a procedure with search capability. Can filter by name, INN, or email.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "procedure_id": {"type": "string", "description": "UUID of the procedure"},
-                    "participant_ids": {"type": "array", "items": {"type": "string"}, "description": "List of participant UUIDs to approve"},
-                    "comment": {"type": "string", "description": "Approval comment"},
-                    "expired_date": {"type": "string", "description": "Expiration date for approval (ISO 8601, registry only)"}
+                    "search": {"type": "string", "description": "Optional search string (name, INN, or email)"}
                 },
-                "required": ["procedure_id", "participant_ids"]
-            }
-        ),
-        types.Tool(
-            name="reject_participants",
-            description="Reject participants and request new applications. Available for procedures with application requirements.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"},
-                    "participant_ids": {"type": "array", "items": {"type": "string"}, "description": "List of participant UUIDs to reject"},
-                    "comment": {"type": "string", "description": "Rejection reason visible to participant"}
-                },
-                "required": ["procedure_id", "participant_ids"]
+                "required": ["procedure_id"]
             }
         ),
         types.Tool(
@@ -376,7 +976,7 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["procedure_id"]
             }
         ),
-        
+                
         # ========== EVENTS ==========
         types.Tool(
             name="get_events",
@@ -392,21 +992,7 @@ async def list_tools() -> list[types.Tool]:
             }
         ),
         
-        # ========== PROCEDURE COMPLETION ==========
-        types.Tool(
-            name="complete_with_winners",
-            description="Complete procedure with selected winners. Must call set_winners first to select winning proposals.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"},
-                    "choices": {"type": "array", "items": {"type": "object"}, "description": "Selected winning proposals"},
-                    "winner_message": {"type": "string", "description": "Message to winners"},
-                    "looser_message": {"type": "string", "description": "Message to non-winners"}
-                },
-                "required": ["procedure_id", "choices"]
-            }
-        ),
+ 
         types.Tool(
             name="complete_without_winners",
             description="Complete procedure without selecting winners. Provide reason and optional message to participants.",
@@ -420,81 +1006,7 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["procedure_id"]
             }
         ),
-        types.Tool(
-            name="finish_proposals_acceptance",
-            description="Finish proposal acceptance early. Transitions procedure from 'Proposal Submission' to 'Evaluation' status.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"}
-                },
-                "required": ["procedure_id"]
-            }
-        ),
-        
-        # ========== STAGES ==========
-        types.Tool(
-            name="get_stages",
-            description="Get list of stage IDs for a procedure with their dates and comments.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"}
-                },
-                "required": ["procedure_id"]
-            }
-        ),
-        types.Tool(
-            name="get_stages_full_info",
-            description="Get complete information about all stages including versions, participants, chats, and proposals.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"}
-                },
-                "required": ["procedure_id"]
-            }
-        ),
-        types.Tool(
-            name="announce_new_stage",
-            description="Announce a new stage for the procedure (e.g., rebidding). Can update procedure parameters for the new stage.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"},
-                    "owner_comment": {"type": "string", "description": "Stage name/comment"},
-                    "custom_mail": {"type": "string", "description": "Message to participants"},
-                    "rollback_proposals": {"type": "boolean", "description": "Reject existing proposals"},
-                    "publish_date": {"type": "string", "description": "Delayed publication date ISO 8601"}
-                },
-                "required": ["procedure_id"]
-            }
-        ),
-        
-        # ========== WINNER SELECTION ==========
-        types.Tool(
-            name="get_choices",
-            description="Get previously made winner selections for a procedure. Returns which proposals were selected and for which items.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"}
-                },
-                "required": ["procedure_id"]
-            }
-        ),
-        types.Tool(
-            name="set_winners",
-            description="Select winners from participant proposals. Can select entire proposals, groups, or individual positions with quantities.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"},
-                    "choices": {"type": "array", "items": {"type": "object"}, "description": "List of selected proposals with proposalId, originId (for positions), and count"}
-                },
-                "required": ["procedure_id", "choices"]
-            }
-        ),
+ 
         
         # ========== INFORMATION TOOLS ==========
         types.Tool(
@@ -508,16 +1020,7 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["company_ids"]
             }
         ),
-        types.Tool(
-            name="get_segments",
-            description="Get business segments available for the company. Can search by segment name.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "search": {"type": "string", "description": "Search by segment name"}
-                }
-            }
-        ),
+  
         types.Tool(
             name="get_tags",
             description="Get tags from the platform with filtering. Returns tags matching search criteria with minimum usage count.",
@@ -531,58 +1034,16 @@ async def list_tools() -> list[types.Tool]:
                 }
             }
         ),
-        types.Tool(
-            name="get_special_conditions",
-            description="Get list of special conditions available for the company. Used for custom contract terms.",
-            inputSchema={
-                "type": "object",
-                "properties": {}
-            }
-        ),
-        
-        # ========== CHAT ==========
-        types.Tool(
-            name="get_chat_spaces",
-            description="Get all chat spaces for the company. Each space corresponds to a procedure.",
-            inputSchema={
-                "type": "object",
-                "properties": {}
-            }
-        ),
-        types.Tool(
-            name="get_chats",
-            description="Get all chats within a specific chat space (procedure). Returns chat IDs and types.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "space_id": {"type": "string", "description": "UUID of the chat space"}
-                },
-                "required": ["space_id"]
-            }
-        ),
-        types.Tool(
-            name="send_chat_message",
-            description="Send a message to a specific chat. Files must be uploaded first using upload_files.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "space_id": {"type": "string", "description": "UUID of the chat space"},
-                    "chat_id": {"type": "string", "description": "UUID of the chat"},
-                    "content": {"type": "string", "description": "Message text"},
-                    "file_ids": {"type": "array", "items": {"type": "string"}, "description": "UUIDs of uploaded files"}
-                },
-                "required": ["space_id", "chat_id", "content"]
-            }
-        ),
+    
         
         # ========== FILE MANAGEMENT ==========
         types.Tool(
             name="upload_files",
-            description="Upload files to company storage. Supports formats: doc, docx, xls, xlsx, pdf, txt, csv, pptx, dwg, jpg, png, gif, bmp, tiff, svg, webp, zip, rar, 7z. Returns file IDs for use in other operations.",
+            description="Upload files to company storage",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "files": {"type": "array", "items": {"type": "object"}, "description": "List of files with name, extension, and base64 content"}
+                    "files": {"type": "array", "items": {"type": "object"}, "description": "List of files with name, extension, and base64 content or full path to file"}
                 },
                 "required": ["files"]
             }
@@ -653,71 +1114,7 @@ async def list_tools() -> list[types.Tool]:
             }
         ),
         
-        # ========== PROMO CODES ==========
-        types.Tool(
-            name="apply_promo_code",
-            description="Apply a promo code to a procedure. Valid for procedures that support commission discounts.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"},
-                    "promo_code": {"type": "string", "description": "Promo code to apply"}
-                },
-                "required": ["procedure_id", "promo_code"]
-            }
-        ),
-        
-        # ========== ADDITIONAL CURRENCIES ==========
-        types.Tool(
-            name="add_additional_currency",
-            description="Add additional currency to a procedure with amount and exchange rate. For multi-currency procedures.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"},
-                    "currency": {"type": "string", "description": "Currency code (USD, EUR, etc)"},
-                    "amount": {"type": "number", "description": "Amount in additional currency"},
-                    "rate": {"type": "number", "description": "Exchange rate to base currency"}
-                },
-                "required": ["procedure_id", "currency", "amount", "rate"]
-            }
-        ),
-        types.Tool(
-            name="update_additional_currencies",
-            description="Update additional currencies for a procedure. Can update amounts and rates for existing currencies.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"},
-                    "additional_currencies": {"type": "array", "items": {"type": "object"}, "description": "List of currencies with amounts and rates"}
-                },
-                "required": ["procedure_id", "additional_currencies"]
-            }
-        ),
-        
-        # ========== CANCELLATION ==========
-        types.Tool(
-            name="cancel_delayed_publication",
-            description="Cancel scheduled delayed publication of a procedure or stage.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"}
-                },
-                "required": ["procedure_id"]
-            }
-        ),
-        types.Tool(
-            name="cancel_stage",
-            description="Cancel the current stage of a procedure. Only available for stage workflows.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"}
-                },
-                "required": ["procedure_id"]
-            }
-        ),
+    
         
         # ========== AI IMPROVEMENT ==========
         types.Tool(
@@ -759,31 +1156,6 @@ async def list_tools() -> list[types.Tool]:
             }
         ),
         
-        # ========== PERMISSION MANAGEMENT ==========
-        types.Tool(
-            name="allow_price_change",
-            description="Allow a participant to change proposal price despite rule violations. Can be granted on request or proactively.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"},
-                    "participant_id": {"type": "string", "description": "UUID of the participant"}
-                },
-                "required": ["procedure_id", "participant_id"]
-            }
-        ),
-        types.Tool(
-            name="reject_price_change_request",
-            description="Reject a participant's request to change proposal price with rule violation.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "procedure_id": {"type": "string", "description": "UUID of the procedure"},
-                    "participant_id": {"type": "string", "description": "UUID of the participant"}
-                },
-                "required": ["procedure_id", "participant_id"]
-            }
-        ),
     ]
 
 
@@ -793,7 +1165,7 @@ async def list_tools() -> list[types.Tool]:
 
 async def execute_tool(tool_name: str, arguments: Dict) -> Any:
     """Execute tool with given arguments"""
-    logger.info(f"Executing tool: {tool_name}")
+    logger.info(f"🔧 Executing tool: {tool_name}")
     logger.debug(f"Arguments: {json.dumps(arguments, ensure_ascii=False, default=str)}")
     try:
         if tool_name == "create_procedure":
@@ -816,6 +1188,8 @@ async def execute_tool(tool_name: str, arguments: Dict) -> Any:
             return await rollback_proposal_handler(arguments)
         elif tool_name == "get_participants":
             return await get_participants_handler(arguments)
+        elif tool_name == "get_participants_with_details":
+            return await get_participants_with_details_handler(arguments)
         elif tool_name == "invite_participants":
             return await invite_participants_handler(arguments)
         elif tool_name == "block_participants":
@@ -900,59 +1274,29 @@ async def execute_tool(tool_name: str, arguments: Dict) -> Any:
         return {"error": str(e)}
 
 
-# Handlers implementation
+# ============================================================================
+# HANDLER IMPLEMENTATIONS
+# ============================================================================
 async def create_procedure_handler(args: Dict) -> Dict:
-    """
-    Create procedure handler with correct field handling for different trading types
-    Fills all fields with default values according to the schema
-    """
+    """Create procedure handler matching the full API schema"""
     logger.info(f"📝 Creating procedure: {args.get('name')}")
     
     try:
+        is_draft = not args.get("publish_immediately", True)
         trading_type = args.get("trading_type", 8)
-        is_draft = args.get("publish_immediately") is False
-        has_positions = bool(args.get("positions"))
+        has_positions = args.get("positions_enabled", True) and bool(args.get("positions"))
         
         # Обработка даты окончания
         acceptance_end_date = args.get("acceptance_end_date")
-        if acceptance_end_date:
-            try:
-                if isinstance(acceptance_end_date, str):
-                    if 'T' in acceptance_end_date:
-                        end_date = datetime.fromisoformat(acceptance_end_date.replace('Z', '+00:00'))
-                    else:
-                        end_date = datetime.strptime(acceptance_end_date, "%Y-%m-%d")
-                else:
-                    end_date = acceptance_end_date
-                
-                if end_date.tzinfo is None:
-                    end_date = end_date.replace(tzinfo=timezone.utc)
-                
-                now = datetime.now(timezone.utc)
-                if end_date < now:
-                    logger.warning(f"acceptance_end_date is in the past, setting to 7 days from now")
-                    acceptance_end_date = (now + timedelta(days=7)).isoformat()
-                else:
-                    days_diff = (end_date - now).days
-                    if days_diff < 7:
-                        logger.warning(f"acceptance_end_date is only {days_diff} days from now, setting to 7 days")
-                        acceptance_end_date = (now + timedelta(days=7)).isoformat()
-                    else:
-                        acceptance_end_date = end_date.isoformat()
-            except Exception as e:
-                logger.error(f"Error parsing acceptance_end_date: {e}")
-                acceptance_end_date = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
-        else:
-            days = args.get("acceptance_end_days", 7)
-            if days < 7:
-                days = 7
-                logger.info(f"acceptance_end_days {args.get('acceptance_end_days')} < 7, setting to 7")
+        if not acceptance_end_date:
+            days = max(args.get("acceptance_end_days", 7), 7)
             acceptance_end_date = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
         
+        # Базовые поля
         data = {
+            "name": args["name"],
             "type": args.get("type", 1),
             "tradingType": trading_type,
-            "name": args.get("name"),
             "description": args.get("description", ""),
             "openType": args.get("open_type", 0),
             "currency": args.get("currency", "RUB"),
@@ -967,159 +1311,149 @@ async def create_procedure_handler(args: Dict) -> Dict:
                     "isResponsibleForApplications": True
                 }
             ],
-            # Поля с значениями по умолчанию
-            "emoji": args.get("emoji", None),
-            "isArchived": False,
-            "specialCondition": args.get("special_condition", None),
-            "code": None,
-            "status": 0 if is_draft else 1,
-            "linkedProcedures": args.get("linked_procedures", []),
-            "participantQuestionnaireEnabled": args.get("participant_questionnaire_enabled", False),
-            "participantQuestionnaire": args.get("participant_questionnaire", []),
-            "participantApplicationFiles": args.get("participant_application_files", False),
+            "positionsEnabled": has_positions,
             "otherParticipantsVisibility": args.get("other_participants_visibility", 0),
+            "ownerVisibility": args.get("owner_visibility", 0),
             "vatEnabled": args.get("vat_enabled", False),
             "alternativeProposals": args.get("alternative_proposals", 0),
-            "additionalCurrencies": args.get("additional_currencies", []),
             "prolongationTime": args.get("prolongation_time", 0),
             "acceptanceEndNotificationHours": args.get("acceptance_end_notification_hours", 0),
             "additionalAcceptanceEndNotificationHours": args.get("additional_acceptance_end_notification_hours", 0),
-            "participantDocumentsAcceptancePeriod": args.get("participant_documents_acceptance_period", None),
-            "ownerVisibility": args.get("owner_visibility", 0),
             "ndaEnabled": args.get("nda_enabled", False),
-            "ndaDescription": args.get("nda_description", None),
-            "ndaFiles": args.get("nda_files", []),
-            "deliveryAddresses": args.get("delivery_addresses", []),
-            "tags": args.get("tags", []),
-            "commonFiles": args.get("common_files", []),
             "questionnaireEnabled": args.get("questionnaire_enabled", False),
-            "questionnaire": args.get("questionnaire", []),
             "proposalRankMethod": args.get("proposal_rank_method", 0),
             "proposalRankOrder": args.get("proposal_rank_order", 0),
-            "proposalRankEmail": args.get("proposal_rank_email", None),
             "proposalRankNotificationEnabled": args.get("proposal_rank_notification_enabled", True),
-            "proposalRankFile": args.get("proposal_rank_file", None),
-            "comment": args.get("comment", None),
-            "budget": args.get("budget", None),
-            "identifier": args.get("identifier", None),
-            "categories": args.get("categories", []),
             "cultureName": args.get("culture_name", "ru"),
-            "segmentId": args.get("segment_id", None),
-            "submissionStartDate": args.get("submission_start_date", None)
+            "tags": args.get("tags", []),
+            "commonFiles": args.get("common_files", []),
+            "deliveryAddresses": args.get("delivery_addresses", []),
+            "linkedProcedures": args.get("linked_procedures", []),
+            "additionalCurrencies": args.get("additional_currencies", []),
+            "categories": args.get("categories", []),
+            "participantQuestionnaireEnabled": args.get("participant_questionnaire_enabled", False),
+            "participantApplicationFiles": args.get("participant_application_files", False),
+            "participantDocumentsAcceptancePeriod": args.get("participant_documents_acceptance_period"),
+            "comment": args.get("comment"),
+            "budget": args.get("budget"),
+            "identifier": args.get("identifier"),
+            "segmentId": args.get("segment_id"),
+            "emoji": args.get("emoji"),
+            "submissionStartDate": args.get("submission_start_date")
         }
         
+        # Удаляем None значения
+        data = {k: v for k, v in data.items() if v is not None}
         
-        # Для типов с позициями (1, 2, 8)
-        if trading_type in [1, 2, 8]:
-            if has_positions:
-                # С позициями
-                data["positionsEnabled"] = True
-                data["positionGroups"] = []
-                
-                group = {
+        # Добавляем NDA файлы если есть
+        if args.get("nda_files"):
+            data["ndaFiles"] = args["nda_files"]
+        
+        if args.get("nda_description"):
+            data["ndaDescription"] = args["nda_description"]
+        
+        # Добавляем анкету если есть
+        if args.get("participant_questionnaire"):
+            data["participantQuestionnaire"] = args["participant_questionnaire"]
+        
+        if args.get("questionnaire"):
+            data["questionnaire"] = args["questionnaire"]
+        
+        # Добавляем файл ранжирования если есть
+        if args.get("proposal_rank_file"):
+            data["proposalRankFile"] = args["proposal_rank_file"]
+        
+        if args.get("proposal_rank_email"):
+            data["proposalRankEmail"] = args["proposal_rank_email"]
+        
+        # Добавляем позиции
+        if has_positions:
+            data["positionGroups"] = [{
+                "originId": str(uuid.uuid4()),
+                "name": "Основная группа",
+                "deviationType": args.get("deviation_type", 0),
+                "betUpDown": args.get("bet_up_down", True),
+                "betStep": args.get("bet_step", 0.01),
+                "betStepType": args.get("bet_step_type", 1),
+                "betReference": args.get("bet_reference", 0),
+                "betPrice": args.get("bet_price", 0),
+                "participantFiles": args.get("participant_files", False),
+                "additionalFields": args.get("additional_fields", []),
+                "positions": []
+            }]
+            
+            for p in args["positions"]:
+                position = {
                     "originId": str(uuid.uuid4()),
-                    "name": args.get("group_name", "Основная группа"),
-                    "deviationType": args.get("deviation_type", 0),
-                    "betUpDown": args.get("bet_up_down", True),
-                    "betStep": args.get("bet_step", 0.01),
-                    "betStepType": args.get("bet_step_type", 1),
-                    "betReference": args.get("bet_reference", 0),
-                    "betPrice": args.get("bet_price", 0),
-                    "participantFiles": args.get("participant_files", False),
-                    "additionalFields": args.get("additional_fields", []),
-                    "positions": []
+                    "name": p.get("name", "Товар"),
+                    "description": p.get("description", ""),
+                    "count": float(p.get("count", 1)),
+                    "unit": p.get("unit", "шт."),
+                    "price": float(p.get("price", 0)),
+                    "betPrice": float(p.get("bet_price", 0)),
+                    "additionalFieldsValues": p.get("additional_fields_values", []),
+                    "files": p.get("files", [])
                 }
-                
-                for p in args["positions"]:
-                    position = {
-                        "originId": str(uuid.uuid4()),
-                        "name": p.get("name", "Товар"),
-                        "description": p.get("description", ""),
-                        "count": float(p.get("count", 1)),
-                        "unit": p.get("unit", "шт."),
-                        "price": float(p.get("price", 0)),
-                        "betPrice": float(p.get("bet_price", 0)),
-                        "additionalFieldsValues": p.get("additional_fields_values", []),
-                        "files": p.get("files", [])
-                    }
-                    group["positions"].append(position)
-                
-                data["positionGroups"].append(group)
-            else:
-                # Без позиций
-                data["positionsEnabled"] = False
+                data["positionGroups"][0]["positions"].append(position)
+        else:
+            # Для торгов без позиций
+            if trading_type in [1, 2, 4]:
                 data["betUpDown"] = args.get("bet_up_down", True)
                 data["betStep"] = args.get("bet_step", 0.01)
                 data["betStepType"] = args.get("bet_step_type", 1)
                 data["betReference"] = args.get("bet_reference", 0)
                 data["betPrice"] = args.get("bet_price", 0)
         
-        # Для ПКО (tradingType=4)
-        elif trading_type == 4:
-            data["positionsEnabled"] = False
-            data["betUpDown"] = args.get("bet_up_down", True)
-            data["betStep"] = args.get("bet_step", 0.01)
-            data["betStepType"] = args.get("bet_step_type", 1)
-            data["betReference"] = args.get("bet_reference", 0)
-            data["betPrice"] = args.get("bet_price", 0)
-            # Для ПКО обязательно нужно указать questionnaire или participantApplicationFiles
-            if not data.get("participantQuestionnaireEnabled") and not data.get("participantApplicationFiles"):
-                data["participantApplicationFiles"] = True
-        
-        # Для реестра (tradingType=16)
-        elif trading_type == 16:
-            data["positionsEnabled"] = False
-            data["participantQuestionnaireEnabled"] = True
-            if not data.get("participantQuestionnaire"):
-                data["participantQuestionnaire"] = [{
-                    "originId": str(uuid.uuid4()),
-                    "text": "Основная информация",
-                    "items": [{
-                        "originId": str(uuid.uuid4()),
-                        "text": "Согласие на обработку данных",
-                        "type": "agreement",
-                        "agreementText": "Я согласен на обработку моих персональных данных",
-                        "required": True,
-                        "private": False,
-                        "canAttachFiles": False,
-                        "canLeaveComment": False,
-                        "files": []
-                    }]
-                }]
-        
-        # Для мониторинга рынка (tradingType=8) без позиций
-        if trading_type == 8 and not has_positions:
+        # Для мониторинга рынка
+        if trading_type == 8:
             data["otherParticipantsVisibility"] = 3
+            data["betUpDown"] = True
+        
+        logger.info(f"📤 Sending to API: {json.dumps(data, ensure_ascii=False, default=str)[:2000]}")
+        
+        endpoint = "procedures/draft" if is_draft else "procedures/create-publish"
         
         
-        logger.info(f"Sending to API: {json.dumps(data, ensure_ascii=False, default=str)[:2000]}")
-        
-        if is_draft:
-            endpoint = "procedures/draft"
-            logger.info("Creating draft procedure...")
-        else:
-            endpoint = "procedures/create-publish"
-            logger.info("Creating and publishing procedure...")
-        
-        result = client.request("POST", endpoint, json_data=data)
-        
-        logger.info(f"Procedure created: {result.get('id')}")
-        return result
-        
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"HTTP Error: {e}")
-        if e.response is not None:
-            logger.error(f"Response status: {e.response.status_code}")
-            logger.error(f"Response body: {e.response.text}")
-        return {
-            "error": str(e),
-            "status_code": e.response.status_code if e.response else None,
-            "response_body": e.response.text if e.response else None
-        }
-    except Exception as e:
-        logger.error(f"Failed to create procedure: {e}", exc_info=True)
-        return {"error": str(e)}
+        try:
+            result = client.request("POST", endpoint, json_data=data)
+            logger.info(f"✅ Procedure created: {result.get('id')}")
+            return result
+            
 
+        except requests.exceptions.HTTPError as e:
+            error_response = {
+                "success": False,
+                "error": "HTTP Error",
+                "status_code": e.response.status_code if e.response else None,
+                "message": str(e)
+            }
+            
+            if e.response is not None:
+                try:
+                    error_body = e.response.json()
+                    error_response["api_error"] = error_body
+                    
+                    if "message" in error_body:
+                        error_response["error_message"] = error_body["message"]
+                    if "code" in error_body:
+                        error_response["error_code"] = error_body["code"]
+                    if "details" in error_body:
+                        error_response["error_details"] = error_body["details"]
+                        
+                except json.JSONDecodeError:
+                    error_response["response_body"] = e.response.text
+            
+            logger.error(f"❌ HTTP Error creating procedure: {error_response}")
+            return error_response
+            
+    except Exception as e:
+        logger.error(f"❌ Failed to create procedure: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": "Internal Error",
+            "message": str(e),
+            "exception_type": type(e).__name__
+        }
 
 async def predict_and_apply_handler(args: Dict) -> Dict:
     params = None
@@ -1130,16 +1464,155 @@ async def get_procedure_handler(args: Dict) -> Dict:
     return client.request("GET", f"procedures/{args['procedure_id']}")
 
 
+
 async def update_procedure_handler(args: Dict) -> Dict:
-    procedure_id = args.pop("procedure_id")
-    params = {}
-    if "custom_mail" in args:
-        params["customMail"] = args.pop("custom_mail")
-    if "rollback_proposals" in args:
-        params["rollbackProposals"] = args.pop("rollback_proposals")
-    return client.request("PATCH", f"procedures/{procedure_id}", params=params if params else None, json_data=args)
-
-
+    """Update procedure handler - supports adding positions to RFI"""
+    logger.info(f"📝 Updating procedure: {args.get('procedure_id')}")
+    
+    try:
+        procedure_id = args.pop("procedure_id")
+        
+        current_proc = client.request("GET", f"procedures/{procedure_id}")
+        if not current_proc:
+            raise Exception(f"Procedure {procedure_id} not found")
+        
+        logger.info(f"Current procedure tradingType: {current_proc.get('tradingType')}")
+        logger.info(f"Current positionsEnabled: {current_proc.get('positionsEnabled')}")
+        
+        # Извлекаем query параметры
+        query_params = {}
+        if "custom_mail" in args:
+            query_params["customMail"] = args.pop("custom_mail")
+        if "rollback_proposals" in args:
+            query_params["rollbackProposals"] = args.pop("rollback_proposals")
+        
+        # Определяем тип торгов
+        trading_type = current_proc.get("tradingType")
+        
+        # Базовые поля - берем из текущей процедуры
+        data = {
+            "name": args.get("name", current_proc.get("name")),
+            "type": args.get("type", current_proc.get("type")),
+            "tradingType": trading_type,
+            "openType": args.get("open_type", current_proc.get("openType")),
+            "currency": args.get("currency", current_proc.get("currency")),
+            "acceptanceEndDate": args.get("acceptance_end_date", current_proc.get("acceptanceEndDate")),
+            "approximateDeadlineForSummingUp": args.get("approximate_deadline_for_summing_up", current_proc.get("approximateDeadlineForSummingUp", 5)),
+            "contacts": args.get("contacts", current_proc.get("contacts")),
+            "users": args.get("users", current_proc.get("users")),
+            "tags": args.get("tags", current_proc.get("tags", [])),
+            "commonFiles": args.get("common_files", current_proc.get("commonFiles", [])),
+            "description": args.get("description", current_proc.get("description", "")),
+        }
+        
+        # Для RFI (trading_type=8) - мониторинг рынка
+        if trading_type == 8:
+            logger.info("Updating RFI procedure...")
+            
+            # Обязательные поля для RFI
+            data["positionsEnabled"] = True
+            data["otherParticipantsVisibility"] = args.get("other_participants_visibility", current_proc.get("otherParticipantsVisibility", 3))
+            data["betUpDown"] = args.get("bet_up_down", current_proc.get("betUpDown", True))
+            data["betStep"] = args.get("bet_step", current_proc.get("betStep", 0.01))
+            data["betStepType"] = args.get("bet_step_type", current_proc.get("betStepType", 1))
+            data["betReference"] = args.get("bet_reference", current_proc.get("betReference", 0))
+            data["betPrice"] = args.get("bet_price", current_proc.get("betPrice", 0))
+            data["participantQuestionnaireEnabled"] = False
+            data["participantApplicationFiles"] = False
+            data["questionnaireEnabled"] = False
+            data["ndaEnabled"] = False
+            data["vatEnabled"] = False
+            data["alternativeProposals"] = 0
+            
+        
+        # Для других типов торгов
+        elif trading_type == 1:  # RFP
+            data["positionsEnabled"] = True
+            data["betUpDown"] = args.get("bet_up_down", current_proc.get("betUpDown", True))
+            data["betStep"] = args.get("bet_step", current_proc.get("betStep", 0.01))
+            data["betStepType"] = args.get("bet_step_type", current_proc.get("betStepType", 1))
+            data["betReference"] = args.get("bet_reference", current_proc.get("betReference", 0))
+            data["betPrice"] = args.get("bet_price", current_proc.get("betPrice", 0))
+            data["positionGroups"] = current_proc.get("positionGroups", [])
+            
+            if "positions" in args:
+                if data["positionGroups"]:
+                    data["positionGroups"][0]["positions"] = args["positions"]
+        
+        elif trading_type == 4:  # PCO
+            data["positionsEnabled"] = False
+            data["betStep"] = args.get("bet_step", current_proc.get("betStep", 0.01))
+        
+        elif trading_type == 2:  # RFQ
+            data["positionsEnabled"] = True
+            data["betUpDown"] = args.get("bet_up_down", current_proc.get("betUpDown", True))
+            data["betStep"] = args.get("bet_step", current_proc.get("betStep", 0.01))
+            data["betStepType"] = args.get("bet_step_type", current_proc.get("betStepType", 1))
+            data["positionGroups"] = current_proc.get("positionGroups", [])
+            
+            if "positions" in args and data["positionGroups"]:
+                data["positionGroups"][0]["positions"] = args["positions"]
+        
+        # Добавляем другие поля
+        other_fields = {
+            "delivery_addresses": "deliveryAddresses",
+            "linked_procedures": "linkedProcedures",
+            "additional_currencies": "additionalCurrencies",
+            "categories": "categories",
+            "participant_questionnaire": "participantQuestionnaire",
+            "questionnaire": "questionnaire",
+            "nda_files": "ndaFiles",
+            "nda_description": "ndaDescription",
+            "proposal_rank_file": "proposalRankFile",
+            "proposal_rank_email": "proposalRankEmail",
+            "comment": "comment",
+            "budget": "budget",
+            "identifier": "identifier",
+            "segment_id": "segmentId",
+            "submission_start_date": "submissionStartDate",
+            "emoji": "emoji"
+        }
+        
+        for field, api_field in other_fields.items():
+            if field in args:
+                data[api_field] = args[field]
+            elif current_proc.get(api_field):
+                data[api_field] = current_proc[api_field]
+        
+        # Булевы поля
+        bool_fields = {
+            "participant_questionnaire_enabled": "participantQuestionnaireEnabled",
+            "participant_application_files": "participantApplicationFiles",
+            "questionnaire_enabled": "questionnaireEnabled",
+            "nda_enabled": "ndaEnabled",
+            "vat_enabled": "vatEnabled"
+        }
+        
+        for field, api_field in bool_fields.items():
+            if field in args:
+                data[api_field] = args[field]
+            elif current_proc.get(api_field) is not None:
+                data[api_field] = current_proc[api_field]
+        
+        # Удаляем None значения
+        data = {k: v for k, v in data.items() if v is not None}
+        
+        # Логируем отправляемые данные
+        logger.info(f"📤 Updating RFI procedure {procedure_id}")
+        logger.info(f"Positions count: {len(data.get('positionGroups', [{}])[0].get('positions', [])) if data.get('positionGroups') else 0}")
+        logger.debug(f"Body: {json.dumps(data, ensure_ascii=False, default=str)[:1000]}")
+        
+        # Отправляем запрос
+        result = client.request("PATCH", f"procedures/{procedure_id}", 
+                                params=query_params if query_params else None, 
+                                json_data=data)
+        
+        logger.info(f"✅ Procedure updated: {result.get('id')}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to update procedure: {e}", exc_info=True)
+        return {"error": str(e)}
 async def delete_procedure_draft_handler(args: Dict) -> Dict:
     client.request("DELETE", f"procedures/{args['procedure_id']}")
     return {"success": True, "message": "Draft deleted"}
@@ -1175,27 +1648,242 @@ async def rollback_proposal_handler(args: Dict) -> Dict:
 
 
 async def get_participants_handler(args: Dict) -> List[Dict]:
-    return client.request("GET", f"procedures/{args['procedure_id']}/participants")
+    """Возвращает сырой список участников процедуры."""
+    result = client.request("GET", f"procedures/{args['procedure_id']}/participants")
+    logger.debug(f"Participants raw: {result}")
+    return result
 
 
 async def invite_participants_handler(args: Dict) -> List[Dict]:
+    """Приглашает участников по ИНН или email."""
     return client.request("POST", f"procedures/{args['procedure_id']}/participants/bytinemail", json_data=args["invitations"])
 
 
+async def find_participant_ids_by_identifiers(procedure_id: str, identifiers: List[str]) -> List[str]:
+    """
+    Находит UUID участников по названию компании, email, ИНН или UUID.
+    Учитывает поля: id, inviteCompanyName, inviteEmail, contactEmail, companyInfo.inn и т.д.
+    """
+    participants = await get_participants_handler({"procedure_id": procedure_id})
+    if not participants:
+        logger.warning(f"No participants found in procedure {procedure_id}")
+        return []
+
+    found_ids = []
+    not_found = []
+
+    for identifier in identifiers:
+        identifier_lower = identifier.lower().strip()
+        found = False
+
+        for p in participants:
+            # Извлекаем возможные идентификаторы
+            p_id = p.get("id", "")
+            p_name = p.get("inviteCompanyName", "") or p.get("companyName", "") or p.get("name", "") or ""
+            p_email = p.get("inviteEmail", "") or p.get("contactEmail", "") or p.get("email", "") or ""
+            p_inn = ""
+            # Если есть companyInfo, можно попробовать взять ИНН оттуда
+            company_info = p.get("companyInfo")
+            if company_info and isinstance(company_info, dict):
+                p_inn = company_info.get("inn", "") or company_info.get("taxId", "")
+
+            # Проверка совпадений
+            if (identifier_lower == p_id.lower() or
+                identifier_lower == p_name.lower() or
+                identifier_lower == p_email.lower() or
+                (p_inn and identifier_lower == p_inn.lower()) or
+                identifier in p_id or                     # частичное совпадение UUID
+                p_name.lower().find(identifier_lower) != -1 or
+                p_email.lower().find(identifier_lower) != -1):
+                found_ids.append(p_id)
+                found = True
+                logger.info(f"Found participant: {p_name} (ID: {p_id}, Email: {p_email})")
+                break
+
+        if not found:
+            not_found.append(identifier)
+            logger.warning(f"Participant not found: {identifier}")
+
+    if not_found:
+        logger.warning(f"Could not find participants: {not_found}")
+
+    return found_ids
+
+
 async def block_participants_handler(args: Dict) -> Dict:
-    data = {
-        "participantIds": args["participant_ids"],
-        "blockReason": args.get("block_reason")
-    }
-    client.request("PUT", f"procedures/{args['procedure_id']}/participants/block", json_data=data)
-    return {"success": True}
+    procedure_id = args["procedure_id"]
+    identifiers = args["participant_ids"]
+    block_reason = args.get("block_reason", "")
+
+    logger.info(f"🔒 Blocking participants in procedure {procedure_id}: {identifiers}")
+
+    try:
+        participant_uuids = await find_participant_ids_by_identifiers(procedure_id, identifiers)
+        if not participant_uuids:
+            return {
+                "success": False,
+                "error": "No participants found",
+                "message": f"Could not find any participants matching: {identifiers}",
+                "provided_identifiers": identifiers
+            }
+
+        data = {
+            "participantIds": participant_uuids,
+            "blockReason": block_reason
+        }
+        result = client.request("PUT", f"procedures/{procedure_id}/participants/block", json_data=data)
+
+        if result and isinstance(result, dict) and result.get("success") is False:
+            return result
+
+        logger.info(f"✅ Successfully blocked {len(participant_uuids)} participants: {participant_uuids}")
+        return {
+            "success": True,
+            "message": f"Successfully blocked {len(participant_uuids)} participant(s)",
+            "blocked_participants": participant_uuids,
+            "block_reason": block_reason,
+            "procedure_id": procedure_id
+        }
+
+    except Exception as e:
+        logger.error(f"Error blocking participants: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": "Blocking failed",
+            "message": str(e),
+            "procedure_id": procedure_id,
+            "identifiers": identifiers
+        }
 
 
 async def unblock_participants_handler(args: Dict) -> Dict:
-    client.request("PUT", f"procedures/{args['procedure_id']}/participants/unblock", json_data=args["participant_ids"])
-    return {"success": True}
+    procedure_id = args["procedure_id"]
+    identifiers = args["participant_ids"]
+
+    logger.info(f"🔓 Unblocking participants in procedure {procedure_id}: {identifiers}")
+
+    try:
+        participant_uuids = await find_participant_ids_by_identifiers(procedure_id, identifiers)
+        if not participant_uuids:
+            return {
+                "success": False,
+                "error": "No participants found",
+                "message": f"Could not find any participants matching: {identifiers}",
+                "provided_identifiers": identifiers
+            }
+
+        result = client.request("PUT", f"procedures/{procedure_id}/participants/unblock", json_data=participant_uuids)
+
+        if result and isinstance(result, dict) and result.get("success") is False:
+            return result
+
+        logger.info(f"✅ Successfully unblocked {len(participant_uuids)} participants: {participant_uuids}")
+        return {
+            "success": True,
+            "message": f"Successfully unblocked {len(participant_uuids)} participant(s)",
+            "unblocked_participants": participant_uuids,
+            "procedure_id": procedure_id
+        }
+
+    except Exception as e:
+        logger.error(f"Error unblocking participants: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": "Unblocking failed",
+            "message": str(e),
+            "procedure_id": procedure_id,
+            "identifiers": identifiers
+        }
 
 
+async def get_blocked_participants_handler(args: Dict) -> List[Dict]:
+    procedure_id = args["procedure_id"]
+    logger.info(f"📋 Getting blocked participants for procedure {procedure_id}")
+
+    try:
+        result = client.request("GET", f"procedures/{procedure_id}/participants/blocked")
+        if result and isinstance(result, dict) and result.get("success") is False:
+            return result
+        logger.info(f"✅ Found {len(result) if isinstance(result, list) else 0} blocked participants")
+        return result
+    except Exception as e:
+        logger.error(f"Error getting blocked participants: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": "Failed to get blocked participants",
+            "message": str(e),
+            "procedure_id": procedure_id
+        }
+
+
+async def get_participants_with_details_handler(args: Dict) -> Dict:
+    procedure_id = args["procedure_id"]
+    search = args.get("search", "").strip()
+
+    logger.info(f"📋 Getting participants for procedure {procedure_id}" + (f" with search: {search}" if search else ""))
+
+    try:
+        participants = await get_participants_handler({"procedure_id": procedure_id})
+        if not participants:
+            return {
+                "success": True,
+                "participants": [],
+                "total": 0,
+                "message": "No participants found in this procedure"
+            }
+
+        if search:
+            search_lower = search.lower()
+            filtered = []
+            for p in participants:
+                name = p.get("inviteCompanyName", "") or p.get("companyName", "") or ""
+                email = p.get("inviteEmail", "") or p.get("contactEmail", "") or ""
+                pid = p.get("id", "")
+                inn = ""
+                company_info = p.get("companyInfo")
+                if company_info and isinstance(company_info, dict):
+                    inn = company_info.get("inn", "") or company_info.get("taxId", "")
+                if (search_lower in name.lower() or
+                    search_lower in email.lower() or
+                    search_lower in pid.lower() or
+                    (inn and search_lower in inn.lower())):
+                    filtered.append(p)
+            participants = filtered
+
+        formatted = []
+        for p in participants:
+            name = p.get("inviteCompanyName", "") or p.get("companyName", "") or p.get("name", "") or "Unknown"
+            email = p.get("inviteEmail", "") or p.get("contactEmail", "") or p.get("email", "")
+            inn = ""
+            company_info = p.get("companyInfo")
+            if company_info and isinstance(company_info, dict):
+                inn = company_info.get("inn", "") or company_info.get("taxId", "")
+            formatted.append({
+                "id": p.get("id"),
+                "name": name,
+                "inn": inn,
+                "email": email,
+                "status": p.get("businessStatus", "active"),
+                "is_blocked": p.get("isBlocked", False),
+                "registered_at": p.get("businessStatusDate") or p.get("createdAt")
+            })
+
+        return {
+            "success": True,
+            "participants": formatted,
+            "total": len(formatted),
+            "procedure_id": procedure_id,
+            "search_used": search if search else None
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting participants with details: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": "Failed to get participants",
+            "message": str(e),
+            "procedure_id": procedure_id
+        }
 async def approve_participants_handler(args: Dict) -> Dict:
     data = {"participants": args["participant_ids"], "comment": args.get("comment")}
     if args.get("expired_date"):
@@ -1209,9 +1897,6 @@ async def reject_participants_handler(args: Dict) -> Dict:
     client.request("PUT", f"procedures/{args['procedure_id']}/participants/reject", json_data=data)
     return {"success": True}
 
-
-async def get_blocked_participants_handler(args: Dict) -> List[Dict]:
-    return client.request("GET", f"procedures/{args['procedure_id']}/participants/blocked")
 
 
 async def get_events_handler(args: Dict) -> List[Dict]:
@@ -1324,23 +2009,109 @@ async def upload_files_handler(args: Dict) -> List[Dict]:
     """
     Upload files to Bidzaar storage.
     Supports formats: doc, docx, xls, xlsx, pdf, txt, csv, pptx, dwg, jpg, png, gif, bmp, tiff, svg, webp, zip, rar, 7z.
+    
+    Args:
+        args: {
+            "files": [
+                {
+                    "name": "filename.pdf",
+                    "extension": "pdf",
+                    "base64": "base64_encoded_content"  # опционально
+                },
+                {
+                    "name": "document.pdf", 
+                    "extension": "pdf",
+                    "file_path": "/path/to/file.pdf"  # альтернативно: путь к файлу
+                }
+            ]
+        }
     """
-    import base64
     
-    logger.info(f"Uploading {len(args['files'])} file(s)")
+    logger.info(f"📤 Uploading {len(args['files'])} file(s)")
     
+    files_base_path = settings_env.bidzaar_files_base_path
+    logger.debug(f"  Reading .env path: {files_base_path}")
     try:
-        
         client._ensure_token()
         
         files = []
         for f in args["files"]:
-            file_data = base64.b64decode(f["base64"])
-            mime_type = f.get("mime_type", "application/octet-stream")
-            files.append(("files", (f["name"], file_data, mime_type)))
-            logger.debug(f"   File: {f['name']}, size: {len(file_data)} bytes")
+            file_data = None
+            file_name = f.get("name")
+            file_extension = f.get("extension", "")
+            
+            # base64 контент
+            if "base64" in f and f["base64"]:
+                logger.debug(f"  Using base64 for: {file_name}")
+                file_data = base64.b64decode(f["base64"])
+            
+            # ссылка на файл (file_path)
+            elif "file_path" in f and f["file_path"]:
+                file_path = f"{files_base_path}/{f['file_path']}"
+                logger.debug(f"  Reading from path: {files_base_path}/{file_path}")
+                
+                
+                if not os.path.exists(file_path):
+                    
+                    alt_paths = [
+                        file_path,
+                        f"{file_path}",
+                        f"{files_base_path}/{Path(file_path).name}",
+                    ]
+                    
+                    found = False
+                    for alt_path in alt_paths:
+                        if os.path.exists(alt_path):
+                            file_path = alt_path
+                            found = True
+                            logger.debug(f"    Found at: {file_path}")
+                            break
+                    
+                    if not found:
+                        raise Exception(f"File not found: {file_path} (searched in: {alt_paths})")
+                
+                with open(file_path, 'rb') as file_obj:
+                    file_data = file_obj.read()
+                
+                if not file_name:
+                    file_name = Path(file_path).name
+                    logger.debug(f"    Auto-detected name: {file_name}")
+            
+            elif "content" in f and f["content"]:
+                logger.warning(f"  Using deprecated 'content' field for: {file_name}")
+                file_data = base64.b64decode(f["content"])
+            
+            else:
+                raise Exception(f"No content provided for file: {file_name}. Use 'base64' or 'file_path'")
+            
+            if not file_name:
+                raise Exception(f"File name is required for file: {f}")
+            
+            mime_type = f.get("mime_type")
+            if not mime_type:
+                ext = file_extension.lower() if file_extension else Path(file_name).suffix.lower().lstrip('.')
+                mime_types = {
+                    'pdf': 'application/pdf',
+                    'doc': 'application/msword',
+                    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    'xls': 'application/vnd.ms-excel',
+                    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    'txt': 'text/plain',
+                    'csv': 'text/csv',
+                    'jpg': 'image/jpeg',
+                    'jpeg': 'image/jpeg',
+                    'png': 'image/png',
+                    'gif': 'image/gif',
+                    'zip': 'application/zip',
+                    'rar': 'application/x-rar-compressed',
+                    '7z': 'application/x-7z-compressed',
+                }
+                mime_type = mime_types.get(ext, 'application/octet-stream')
+            
+            files.append(("files", (file_name, file_data, mime_type)))
+            logger.debug(f"   File: {file_name}, size: {len(file_data)} bytes, type: {mime_type}")
         
-        
+
         headers = {
             'Authorization': f'Bearer {client.access_token}',
             'X-Bidzaar-Connector-User-Email': client.config.user_email
@@ -1348,7 +2119,6 @@ async def upload_files_handler(args: Dict) -> List[Dict]:
         
         url = client._get_api_url("files/upload")
         
-    
         response = client.session.post(
             url, 
             files=files, 
@@ -1356,9 +2126,8 @@ async def upload_files_handler(args: Dict) -> List[Dict]:
             timeout=60
         )
         
-        # Если 401 - пробуем обновить токен и повторить
         if response.status_code == 401:
-            logger.warning("Token expired, refreshing...")
+            logger.warning("⚠️ Token expired, refreshing...")
             client._refresh_token()
             headers['Authorization'] = f'Bearer {client.access_token}'
             response = client.session.post(url, files=files, headers=headers, timeout=60)
@@ -1366,7 +2135,7 @@ async def upload_files_handler(args: Dict) -> List[Dict]:
         response.raise_for_status()
         
         result = response.json()
-        logger.info(f"Files uploaded successfully: {len(result)} file(s)")
+        logger.info(f"✅ Files uploaded successfully: {len(result)} file(s)")
         return result
         
     except requests.exceptions.HTTPError as e:
@@ -1475,7 +2244,7 @@ async def reject_price_change_request_handler(args: Dict) -> None:
 async def call_tool(name: str, arguments: Any) -> list[types.TextContent]:
     try:
         result = await execute_tool(name, arguments)
-        
+
         if isinstance(result, (dict, list)):
             text = json.dumps(result, ensure_ascii=False)
         else:
