@@ -1,5 +1,5 @@
 # bidzaar_mcp_server
-Пример реализация MCP сервера для ии агентов для площадки ЭТП bidzaar 
+Пример реализация MCP сервера для ии агентов для площадки ЭТП bidzaar и навык (SKILL.MD) для публикации процедуры
 https://phoenix.bidzaar.com/doc/connector/index.htm
 
 ### Tools list: 
@@ -8,48 +8,19 @@ https://phoenix.bidzaar.com/doc/connector/index.htm
 - update_procedure
 - delete_procedure_draft
 - publish_procedure
-- get_proposals_ids
-- get_proposals
-- get_proposals_ranks
-- rollback_proposal
 - get_participants
 - invite_participants
 - block_participants
 - unblock_participants
-- approve_participants
-- reject_participants
 - get_blocked_participants
 - get_events
-- complete_with_winners
 - complete_without_winners
-- finish_proposals_acceptance
-- get_stages
-- get_stages_full_info
-- announce_new_stage
-- get_choices
-- set_winners
 - get_companies_info
-- get_segments
 - get_tags
-- get_special_conditions
-- get_chat_spaces
-- get_chats
-- send_chat_message
 - upload_files
 - get_file
-- get_comparison_file
-- get_report_file
-- get_participant_applications
-- request_documents
-- apply_promo_code
-- add_additional_currency
-- update_additional_currencies
-- cancel_delayed_publication
-- cancel_stage
 - improve_description
 - return_to_evaluation
-- allow_price_change
-- reject_price_change_request
 
 ### Example:
 
