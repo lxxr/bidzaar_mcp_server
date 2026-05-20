@@ -1,4 +1,4 @@
-# bidzaar_mcp_server
+# Bidzaar MCP tools
 
 [![MCP](https://img.shields.io/badge/Model%20Context%20Protocol-blue)](https://modelcontextprotocol.io)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -114,8 +114,9 @@ BIDZAAR_API_VERSION=5.3
 
 # Путь для временного хранения загружаемых файлов (должен существовать)
 BIDZAAR_FILES_BASE_PATH=/tmp/bidzaar_uploads
-⚠️ Важно: Путь BIDZAAR_FILES_BASE_PATH используется при загрузке файлов через file_path. Сервер не создаёт его автоматически.
 ```
+⚠️ Важно: Путь BIDZAAR_FILES_BASE_PATH используется при загрузке файлов через file_path. Сервер не создаёт его автоматически.
+
 ## 🔌 Конфигурация для ИИ-агентов
 ### 1. Claude Desktop
 Добавьте в claude_desktop_config.json (macOS: ~/Library/Application Support/Claude/, Windows: %APPDATA%\Claude\):
