@@ -193,7 +193,7 @@ python /path/to/bidzaar_mcp_server.py
 ## 💡 Примеры использования
 ### Создание процедуры (RFI – мониторинг рынка)
 ```
-python
+code
 result = await agent.call_tool("create_procedure", {
     "name": "Поиск поставщиков ноутбуков",
     "type": 1,                     # закупка
