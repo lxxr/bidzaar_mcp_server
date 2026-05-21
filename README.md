@@ -99,8 +99,8 @@ pip install -r requirements.txt
 Создайте файл .env в корне проекта (или укажите путь в Settings_env):
 ```
 ini
-# Stage (тест) или production
-BIDZAAR_BASE_URL=https://phoenix.bidzaar.com
+# Stage (тест https://phoenix.bidzaar.com) или production (https://bidzaar.com)
+BIDZAAR_BASE_URL=https://phoenix.bidzaar.com 
 
 # Учётные данные из личного кабинета Bidzaar
 BIDZAAR_CLIENT_ID=your_client_id
@@ -109,8 +109,8 @@ BIDZAAR_CLIENT_SECRET=your_client_secret
 # Email пользователя-организатора (должен существовать в системе)
 BIDZAAR_USER_EMAIL=organizer@example.com
 
-# Версия API (согласно документации – 5.3)
-BIDZAAR_API_VERSION=5.3
+# Версия API (согласно документации – 5.4)
+BIDZAAR_API_VERSION=5.4
 
 # Путь для временного хранения загружаемых файлов (должен существовать)
 BIDZAAR_FILES_BASE_PATH=/tmp/bidzaar_uploads
@@ -279,9 +279,6 @@ bidzaar_mcp_server/
 
 ### Ошибка: `ModuleNotFoundError`
 Установите зависимости: `pip install -r requirements.txt`
-
-## 🤝 Вклад в проект
-Принимаются Pull Requests. Пожалуйста, сохраняйте совместимость с MCP и используйте black / ruff для форматирования.
 
 ## 📄 Лицензия и ссылки
 
