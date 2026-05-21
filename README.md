@@ -3,7 +3,7 @@
 [![MCP](https://img.shields.io/badge/Model%20Context%20Protocol-blue)](https://modelcontextprotocol.io)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-MCP-сервер для интеграции ИИ-агентов с торговой платформой **Bidzaar** (ЭТП).  
+Простой stdio MCP-сервер для интеграции ИИ-агентов с торговой платформой **Bidzaar** (ЭТП).  
 Позволяет создавать, управлять и анализировать закупочные процедуры, участников, документы, события, а также генерировать описания через AI.
 
 > 📘 **Официальная документация API Bidzaar**  
