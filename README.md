@@ -97,8 +97,7 @@ pip install -r requirements.txt
 ```
 ### Переменные окружения
 Создайте файл .env в корне проекта (или укажите путь в Settings_env):
-```
-ini
+```ini
 # Stage (тест https://phoenix.bidzaar.com) или production (https://bidzaar.com)
 BIDZAAR_BASE_URL=https://phoenix.bidzaar.com 
 
@@ -120,8 +119,7 @@ BIDZAAR_FILES_BASE_PATH=/tmp/bidzaar_uploads
 ## 🔌 Конфигурация для ИИ-агентов
 ### 1. Claude Desktop
 Добавьте в claude_desktop_config.json (macOS: ~/Library/Application Support/Claude/, Windows: %APPDATA%\Claude\):
-```
-json
+```json
 {
   "mcpServers": {
     "bidzaar": {
@@ -140,8 +138,7 @@ json
 }
 ```
 ### 2. LangChain (с langchain-mcp-adapters)
-```
-python
+```python
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 MCP_SERVERS = {
@@ -165,8 +162,7 @@ async def get_tools():
     return await client.get_tools()
 ```
 ### 3. Nanobot
-```
-python
+```python
 from nanobot import Nanobot
 from mcp import StdioServerParameters
 
@@ -186,14 +182,12 @@ bot = Nanobot()
 bot.register_mcp_server("bidzaar", server_params)
 ```
 ### 4. Любой MCP-клиент
-```
-bash
+```bash
 python /path/to/bidzaar_mcp_server.py
 ```
 ## 💡 Примеры использования
 ### Создание процедуры (RFI – мониторинг рынка)
-```
-code
+```python
 result = await agent.call_tool("create_procedure", {
     "name": "Поиск поставщиков ноутбуков",
     "type": 1,                     # закупка
@@ -207,8 +201,7 @@ result = await agent.call_tool("create_procedure", {
 })
 ```
 ### Приглашение участников по ИНН
-```
-python
+```python
 await agent.call_tool("invite_participants", {
     "procedure_id": "550e8400-e29b-41d4-a716-446655440000",
     "invitations": [
@@ -218,8 +211,7 @@ await agent.call_tool("invite_participants", {
 })
 ```
 ### Блокировка участника по названию компании
-```
-python
+```python
 await agent.call_tool("block_participants", {
     "procedure_id": "...",
     "participant_ids": ["ООО Ромашка"],   # или UUID / email
@@ -227,8 +219,7 @@ await agent.call_tool("block_participants", {
 })
 ```
 ### Загрузка файла (локальный путь)
-```
-python
+```python
 await agent.call_tool("upload_files", {
     "files": [{
         "file_path": "contract.pdf",
@@ -238,8 +229,7 @@ await agent.call_tool("upload_files", {
 })
 ```
 ### Улучшение описания через AI
-```
-python
+```python
 improved = await agent.call_tool("improve_description", {
     "procedure_id": "...",
     "description": "нужны стулья офисные недорогие, 50 штук"
@@ -247,7 +237,6 @@ improved = await agent.call_tool("improve_description", {
 ```
 ## 📁 Структура проекта
 ```
-text
 bidzaar_mcp_server/
 ├── bidzaar_mcp_server.py   # Основной сервер MCP (включает API клиент)
 ├── requirements.txt        # Зависимости (mcp, pydantic-settings, requests)
